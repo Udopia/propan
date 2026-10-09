@@ -1,11 +1,15 @@
 #include <doctest/doctest.h>
 
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <string>
 #include <vector>
 
 #include "propan/stream_buffer.h"
 #include "test_util.h"
+
+using namespace propan;
 
 using test::TempFile;
 
@@ -165,6 +169,51 @@ TEST_CASE("readClause skips header and comments") {
     REQUIRE(in.readClause(c));
     CHECK(c == Cl { Lit(3, false) });
     CHECK_FALSE(in.readClause(c));
+}
+
+TEST_CASE("skipBlanks reports whether another token follows on the same line") {
+    TempFile f("p wcnf 3 2 \t 10\np wcnf 3 2  \n5 0");
+    StreamBuffer in(f.c_str());
+    int x;
+    uint64_t top = 0;
+    REQUIRE(in.skipString("p wcnf"));
+    REQUIRE(in.readInteger(&x));
+    REQUIRE(in.readInteger(&x));
+    REQUIRE(in.skipBlanks());
+    REQUIRE(in.readUInt64(&top));
+    CHECK(top == 10);
+    CHECK_FALSE(in.skipBlanks());  // at newline
+    REQUIRE(in.skipLine());
+    REQUIRE(in.skipString("p wcnf"));
+    REQUIRE(in.readInteger(&x));
+    REQUIRE(in.readInteger(&x));
+    CHECK_FALSE(in.skipBlanks());  // trailing blanks, then newline
+    REQUIRE(in.skipLine());
+    REQUIRE(in.readInteger(&x));
+    CHECK(x == 5);
+    REQUIRE(in.readInteger(&x));
+    CHECK(x == 0);
+    CHECK_FALSE(in.skipBlanks());  // at eof
+}
+
+TEST_CASE("non-ASCII bytes in comments are skipped") {
+    TempFile f("c gr\xc3\xbc\xc3\x9f \xff\xfe\n1 0\n");
+    StreamBuffer in(f.c_str());
+    Cl c;
+    REQUIRE(in.readClause(c));
+    CHECK(c == Cl { Lit(1, false) });
+}
+
+TEST_CASE("corrupt compressed input throws instead of returning garbage") {
+    std::string gz;
+    {
+        std::ifstream src(test::data("sat_small.cnf.gz"), std::ios::binary);
+        gz.assign(std::istreambuf_iterator<char>(src), {});
+    }
+    REQUIRE(gz.size() > 20);
+    std::string corrupt = gz.substr(0, 10) + std::string(gz.size() - 10, '\x5a');
+    TempFile f(corrupt, ".cnf.gz");
+    CHECK_THROWS_AS({ StreamBuffer in(f.c_str()); Cl c; while (in.readClause(c)) { } }, ParserException);
 }
 
 TEST_CASE("missing file throws") {

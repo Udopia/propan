@@ -11,6 +11,7 @@ add_executable(propan_tests
     main.cc
     test_solver_types.cc
     test_stream_buffer.cc
+    test_clause_arena.cc
     test_cnf_formula.cc
     test_wcnf_formula.cc
     test_trail.cc)

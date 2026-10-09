@@ -1,180 +1,204 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2024 Ashlin Iser, KIT - Karlsruhe Institute of Technology
+
 /**
- * @brief Trail class
- * @author Ashlin Iser
- * @license MIT
+ * @file trail.h
+ * @brief The trail: assignment stack with decision levels and unit propagation.
  */
 
-#ifndef PROPAN_TRAIL_H_
-#define PROPAN_TRAIL_H_
+#pragma once
 
+#include <cstddef>
+#include <cstdint>
+#include <iostream>
+#include <span>
 #include <vector>
-#include "propan/solver_types.h"
+
+#include "propan/clause_arena.h"
 #include "propan/cnf_formula.h"
+#include "propan/solver_types.h"
 
+namespace propan {
+
+/**
+ * @brief Assignment stack ("trail") with decision levels and unit propagation.
+ *
+ * The trail holds the assigned literals in assignment order. It is divided
+ * into decision levels: level 0 (the root level) holds the units of the
+ * formula and their consequences and is never undone; every call to
+ * newLevel() opens a new level, to which any number of literals may be pushed
+ * (decisions) before propagate() adds their consequences. backtrack() undoes
+ * the most recent level.
+ *
+ * Values are of type Val (#VAL_TRUE, #VAL_FALSE, #VAL_UNASSIGNED), so that the
+ * value of a literal is the value of its variable, negated if the literal is
+ * negative.
+ *
+ * Propagation uses occurrence lists, i.e. every clause is visited whenever
+ * one of its literals becomes false.
+ */
 class Trail {
-public:
+ public:
+    Trail() = default;
 
-    const bool verb = false;
-
-    std::vector<Lit> trail; // Trail
-    std::vector<unsigned> trail_lim; // Stack of trail limits
-    std::vector<uint8_t> val; // Assignment (0 = unassigned, 1 = true, 2 = false)
-    std::vector<For> occ; // Occurence list
-    int head = 0; // Head of the trail which is not yet propagated
-
-    // value constants
-    const uint8_t UNASSIGNED = 0;
-    const uint8_t TRUE = 1;
-    const uint8_t FALSE = 2;
-
-    Trail() : trail(), trail_lim(), val(), occ() { }
-
+    /// Resets to an empty trail over zero variables (forgets the formula).
     void clear() {
-        occ.clear();
-        val.clear();
-        trail.clear();
-        trail_lim.clear();
-        head = 0;
+        trail_.clear();
+        trail_lim_.assign(1, 0);
+        val_.clear();
+        occ_.clear();
+        clauses_ = nullptr;
+        head_ = 0;
     }
 
     /**
-     * Initializes the trail for the given formula: builds occurrence lists, assigns unit clauses
-     * on the root level (level 0, which cannot be backtracked) and propagates them.
+     * @brief Initializes the trail for the given formula.
+     *
+     * Builds the occurrence lists, assigns the unit clauses on level 0 and
+     * propagates them. The formula must outlive the trail (or the next call
+     * to init()).
      * @return false if the formula is refuted by unit propagation (or contains the empty clause)
      */
-    bool init(CNFFormula& formula) {
+    bool init(const CNFFormula& formula) {
         clear();
-        occ.resize(2*formula.nVars()+2);
-        val.resize(formula.nVars()+1);
-        trail_lim.push_back(0);
+        clauses_ = &formula.clauses();
+        occ_.resize(2 * formula.nVars() + 2);
+        val_.resize(formula.nVars() + 1);
         bool ok = true;
-        for (Cl* cls : formula) {
-            if (cls->empty()) ok = false;
-            for (Lit lit : *cls) {
-                occ[lit].push_back(cls);
+        for (ClauseRef ref : clauses_->refs()) {
+            std::span<const Lit> clause = (*clauses_)[ref];
+            if (clause.empty()) ok = false;
+            for (Lit lit : clause) {
+                occ_[lit].push_back(ref);
             }
         }
-        for (Cl* cls : formula) {
-            if (ok && cls->size() == 1) {
-                if (verb) std::cout << "Unit clause: " << *cls << std::endl;
-                ok = push((*cls)[0]);
+        for (ClauseRef ref : clauses_->refs()) {
+            std::span<const Lit> clause = (*clauses_)[ref];
+            if (ok && clause.size() == 1) {
+                ok = push(clause[0]);
             }
         }
         return ok && propagate();
     }
 
+    /**
+     * @brief Propagates all literals pushed since the last propagation to fixpoint.
+     * @return false on conflict (the trail is then partially propagated; backtrack)
+     */
     bool propagate() {
-        while (head < trail.size()) {
-            Lit lit = trail[head];
-            head++;
-            for (Cl* cls : occ[~lit]) {
-                if (verb) std::cout << "Checking clause: " << *cls << std::endl;
-                Lit unit = Lit();
-                int count = 0;
-                for (Lit lit : *cls) {
-                    if (val[lit.var()] == lit.sign() + 1) {
-                        if (verb) std::cout << "Clause is satisfied." << std::endl;
-                        unit = Lit();
-                        break; // clause is satisfied
-                    } 
-                    else if (val[lit.var()] == UNASSIGNED) {
-                        if (unit != 0) {
-                            if (verb) std::cout << "More than one unassigned literal." << std::endl;
-                            unit = Lit();
-                            break; // more than one unassigned literal
-                        }
+        const ClauseArena& clauses = *clauses_;
+        while (head_ < trail_.size()) {
+            Lit falsified = ~trail_[head_++];
+            for (ClauseRef ref : occ_[falsified]) {
+                Lit unit = UNDEF_LIT;
+                for (Lit lit : clauses[ref]) {
+                    Val v = value(lit);
+                    if (v == VAL_TRUE) goto next_clause;  // satisfied
+                    if (v == VAL_UNASSIGNED) {
+                        if (unit != UNDEF_LIT) goto next_clause;  // two unassigned: not unit
                         unit = lit;
                     }
-                    else {
-                        if (verb) std::cout << "Literal " << lit << " is false." << std::endl;
-                        count++;
-                    }
                 }
-                if ((unit != 0 && !push(unit)) || count == cls->size()) {
-                    return false;
-                }
+                if (unit == UNDEF_LIT) return false;  // all literals false: conflict
+                assign(unit);
+            next_clause:;
             }
         }
         return true;
-    }
-
-    uint8_t value(Var var) {
-        return val[var];
-    }
-
-    bool push(Lit lit) {
-        if (verb) std::cout << "Pushing " << lit << std::endl;
-        uint8_t new_val = lit.sign() ? FALSE : TRUE;
-        if (val[lit.var()] != 0) {
-            return val[lit.var()] == new_val;
-        }
-        val[lit.var()] = new_val;
-        trail.push_back(lit);
-        if (verb) {
-            std::cout << "Trail: ";
-            for (Lit l : trail) {
-                std::cout << l << " ";
-            }
-            std::cout << std::endl;
-        }
-        return true;
-    }
-
-    void newLevel() {
-        trail_lim.push_back(trail.size());
     }
 
     /**
-     * Undoes all assignments of the current decision level.
+     * @brief Assigns the literal true on the current level (without propagation).
+     * @return false if the literal is already false; true if it is (now) true
+     */
+    bool push(Lit lit) {
+        Val v = value(lit);
+        if (v != VAL_UNASSIGNED) return v == VAL_TRUE;
+        assign(lit);
+        return true;
+    }
+
+    /// Opens a new decision level.
+    void newLevel() { trail_lim_.push_back(static_cast<unsigned>(trail_.size())); }
+
+    /**
+     * @brief Undoes all assignments of the current decision level.
      * @return false (and does nothing) on the root level
      */
     bool backtrack() {
-        if (trail_lim.size() > 1) {
-            if (verb) std::cout << "Backtracking to position " << trail_lim.back() << std::endl;
-            for (int i = trail.size()-1; i >= (int)trail_lim.back(); i--) {
-                if (verb) std::cout << "Unassigning " << trail[i] << " at position " << i << std::endl;
-                val[trail[i].var()] = UNASSIGNED;
-            }
-            trail.resize(trail_lim.back());
-            trail_lim.pop_back();
-            head = trail.size();
-            return true;
+        if (trail_lim_.size() <= 1) return false;
+        for (std::size_t i = trail_lim_.back(); i < trail_.size(); ++i) {
+            val_[trail_[i].var()] = VAL_UNASSIGNED;
         }
-        return false;
+        trail_.resize(trail_lim_.back());
+        trail_lim_.pop_back();
+        head_ = trail_.size();
+        return true;
     }
 
-    Lit operator[](int i) {
-        return trail[i];
+    /// Value of the variable: #VAL_TRUE, #VAL_FALSE or #VAL_UNASSIGNED.
+    Val value(Var var) const { return val_[var]; }
+
+    /// Value of the literal: #VAL_TRUE, #VAL_FALSE or #VAL_UNASSIGNED.
+    Val value(Lit lit) const {
+        Val v = val_[lit.var()];
+        return lit.sign() ? -v : v;
     }
 
-    int size() {
-        return trail.size();
-    }
+    /// The i-th assigned literal.
+    Lit operator[](std::size_t i) const { return trail_[i]; }
 
-    // Print the trail
-    void print() {
-        for (Lit lit : trail) {
-            std::cout << lit << " ";
+    /// Number of assigned literals.
+    std::size_t size() const noexcept { return trail_.size(); }
+
+    /// All assigned literals in assignment order.
+    std::span<const Lit> literals() const noexcept { return trail_; }
+
+    /// Number of variables of the formula given to init().
+    unsigned nVars() const noexcept { return val_.empty() ? 0 : static_cast<unsigned>(val_.size() - 1); }
+
+    /// Current decision level (0 = root level).
+    unsigned level() const noexcept { return static_cast<unsigned>(trail_lim_.size() - 1); }
+
+    /// Trail position of the first literal of the given level (`level <= level()`).
+    std::size_t levelStart(unsigned level) const { return trail_lim_[level]; }
+
+    /// Prints the assigned literals in DIMACS notation on one line.
+    void print(std::ostream& out = std::cout) const {
+        for (Lit lit : trail_) {
+            out << lit << " ";
         }
-        std::cout << std::endl;
+        out << std::endl;
     }
 
-    // Test if trail satisfies the formula
-    bool satisfies(CNFFormula& formula) {
-        for (Cl* cls : formula) {
+    /// True if every clause of the formula has a true literal.
+    bool satisfies(const CNFFormula& formula) const {
+        for (auto clause : formula) {
             bool sat = false;
-            for (Lit lit : *cls) {
-                if (val[lit.var()] == lit.sign() + 1) {
+            for (Lit lit : clause) {
+                if (value(lit) == VAL_TRUE) {
                     sat = true;
                     break;
                 }
             }
-            if (!sat) {
-                return false;
-            }
+            if (!sat) return false;
         }
         return true;
     }
+
+ private:
+    /// Assigns the unassigned literal true on the current level.
+    void assign(Lit lit) {
+        val_[lit.var()] = lit.sign() ? VAL_FALSE : VAL_TRUE;
+        trail_.push_back(lit);
+    }
+
+    std::vector<Lit> trail_;                      ///< assigned literals in assignment order
+    std::vector<unsigned> trail_lim_ { 0 };       ///< trail position where each level starts
+    std::vector<Val> val_;                        ///< value per variable
+    std::vector<std::vector<ClauseRef>> occ_;     ///< occurrence list per literal
+    const ClauseArena* clauses_ = nullptr;        ///< clauses of the formula given to init()
+    std::size_t head_ = 0;                        ///< first trail position not yet propagated
 };
 
-#endif  // PROPAN_TRAIL_H_
+}  // namespace propan

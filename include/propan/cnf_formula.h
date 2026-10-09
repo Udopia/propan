@@ -1,122 +1,99 @@
-/*************************************************************************************************
-CNFFormula -- Copyright (c) 2021, Ashlin Iser, KIT - Karlsruhe Institute of Technology
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2021 Ashlin Iser, KIT - Karlsruhe Institute of Technology
 
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
-associated documentation files (the "Software"), to deal in the Software without restriction,
-including without limitation the rights to use, copy, modify, merge, publish, distribute,
-sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or
-substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
-NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
-NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
-DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT
-OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- **************************************************************************************************/
+/**
+ * @file cnf_formula.h
+ * @brief Formula in conjunctive normal form, stored in a ClauseArena.
+ */
 
 #pragma once
 
 #include <algorithm>
+#include <cstddef>
+#include <initializer_list>
+#include <span>
+#include <utility>
+
+#include "propan/clause_arena.h"
 #include "propan/solver_types.h"
 #include "propan/stream_buffer.h"
 
+namespace propan {
+
+/**
+ * @brief A CNF formula: a list of clauses over variables `1..nVars()`.
+ *
+ * Clauses are normalized when added: literals are sorted by index, duplicate
+ * literals are removed and tautologies are dropped. The empty clause is kept.
+ *
+ * Iteration yields the clauses as `std::span<const Lit>` in insertion order;
+ * clauses() gives access to the underlying ClauseArena and its references.
+ * The formula is a value type: copies are deep, moves leave the source empty.
+ */
 class CNFFormula {
  public:
-    For formula;
-    unsigned variables;
+    using const_iterator = ClauseArena::const_iterator;
 
-    CNFFormula() : formula(), variables(0) { }
+    CNFFormula() = default;
 
-    /// Construct from clauses (deep copy, the caller keeps ownership of the given clauses)
-    CNFFormula(const For& f, unsigned vars) : formula(), variables(vars) {
-        for (const Cl* clause : f) {
-            formula.push_back(new Cl(*clause));
-        }
-    }
+    /**
+     * @brief Reads a DIMACS CNF file, possibly compressed.
+     * @throw ParserException on I/O or format errors
+     */
+    explicit CNFFormula(const char* filename) { readDimacsFromFile(filename); }
 
-    CNFFormula(const char* filename) : CNFFormula() {
-        readDimacsFromFile(filename);
-    }
+    CNFFormula(const CNFFormula&) = default;
+    CNFFormula& operator=(const CNFFormula&) = default;
 
-    // Copy constructor
-    CNFFormula(const CNFFormula& other) : formula(), variables(other.variables) {
-        for (Cl* clause : other.formula) {
-            formula.push_back(new Cl(*clause)); // Deep copy each clause
-        }
-    }
-
-    // Copy assignment operator
-    CNFFormula& operator=(const CNFFormula& other) {
-        if (this != &other) { // Protect against self-assignment
-            clear(); // Clean up existing resources
-            variables = other.variables;
-            for (Cl* clause : other.formula) {
-                formula.push_back(new Cl(*clause)); // Deep copy each clause
-            }
-        }
-        return *this;
-    }
-
-    // Move constructor
+    /// Leaves `other` empty.
     CNFFormula(CNFFormula&& other) noexcept
-        : formula(std::move(other.formula)), variables(other.variables) {
-        other.formula.clear();
-        other.variables = 0; // Leave `other` in a valid state
-    }
+        : clauses_(std::move(other.clauses_)), variables_(std::exchange(other.variables_, 0)) { }
 
-    // Move assignment operator
+    /// Leaves `other` empty.
     CNFFormula& operator=(CNFFormula&& other) noexcept {
         if (this != &other) {
-            clear();
-            formula = std::move(other.formula);
-            variables = other.variables;
-            other.formula.clear();
-            other.variables = 0;
+            clauses_ = std::move(other.clauses_);
+            variables_ = std::exchange(other.variables_, 0);
         }
         return *this;
     }
 
-    ~CNFFormula() {
-        clear();
+    const_iterator begin() const { return clauses_.begin(); }
+    const_iterator end() const { return clauses_.end(); }
+
+    /// Literals of the i-th clause.
+    std::span<const Lit> operator[](std::size_t i) const { return clauses_[i]; }
+
+    /// Literals of the referenced clause.
+    std::span<const Lit> operator[](ClauseRef ref) const { return clauses_[ref]; }
+
+    /// The underlying clause storage.
+    const ClauseArena& clauses() const noexcept { return clauses_; }
+
+    /// Number of variables (maximum variable id).
+    unsigned nVars() const noexcept { return variables_; }
+
+    /// Number of clauses.
+    std::size_t nClauses() const noexcept { return clauses_.size(); }
+
+    /// Adds a fresh variable and returns its id.
+    unsigned newVar() noexcept { return ++variables_; }
+
+    /// Ensures that variables `1..n` exist (e.g. when declared but unused).
+    void ensureVars(unsigned n) noexcept { variables_ = std::max(variables_, n); }
+
+    /// Removes all clauses and variables.
+    void clear() noexcept {
+        clauses_.clear();
+        variables_ = 0;
     }
 
-    typedef For::const_iterator const_iterator;
-
-    inline const_iterator begin() const {
-        return formula.begin();
-    }
-
-    inline const_iterator end() const {
-        return formula.end();
-    }
-
-    inline const Cl* operator[] (int i) const {
-        return formula[i];
-    }
-
-    inline size_t nVars() const {
-        return variables;
-    }
-
-    inline size_t nClauses() const {
-        return formula.size();
-    }
-
-    inline int newVar() {
-        return ++variables;
-    }
-
-    inline void clear() {
-        for (Cl* clause : formula) {
-            delete clause;
-        }
-        formula.clear();
-        variables = 0;
-    }
-
+    /**
+     * @brief Reads clauses from a DIMACS CNF file, possibly compressed, and adds them.
+     *
+     * Variables declared in the header count in nVars() even if unused.
+     * @throw ParserException on I/O or format errors
+     */
     void readDimacsFromFile(const char* filename) {
         StreamBuffer in(filename);
         Cl clause;
@@ -126,7 +103,7 @@ class CNFFormula {
                     in.skipString("p cnf");
                     int vars;
                     if (in.readInteger(&vars) && vars > 0) {
-                        variables = std::max(variables, static_cast<unsigned>(vars));
+                        ensureVars(static_cast<unsigned>(vars));
                     }
                 }
                 if (!in.skipLine()) break;
@@ -134,42 +111,45 @@ class CNFFormula {
                 int plit;
                 while (in.readInteger(&plit)) {
                     if (plit == 0) break;
-                    clause.push_back(Lit(abs(plit), plit < 0));
+                    clause.push_back(Lit::fromDimacs(plit));
                 }
-                readClause(clause.begin(), clause.end());
+                addClause(clause);
                 clause.clear();
             }
         }
     }
 
-    void readClause(std::initializer_list<Lit> list) {
-        readClause(list.begin(), list.end());
+    /// Normalizes and adds the clause. @return false if it was dropped as a tautology
+    bool addClause(std::initializer_list<Lit> clause) {
+        return addClause(std::span<const Lit>(clause.begin(), clause.size()));
     }
 
-    template <typename Iterator>
-    void readClause(Iterator begin, Iterator end) {
-        Cl* clause = new Cl { begin, end };
-        if (clause->size() > 0) {
-            // remove redundant literals
-            std::sort(clause->begin(), clause->end());
-            unsigned dup = 0;
-            for (auto it = clause->begin(), jt = clause->begin()+1; jt != clause->end(); ++jt) {
-                if (*it != *jt) {  // unique
-                    if (it->var() == jt->var()) {
-                        delete clause;
-                        return;  // no tautologies
-                    }
-                    ++it;
-                    *it = *jt;
-                } else {
-                    ++dup;
-                }
-            }
-            clause->resize(clause->size() - dup);
-            clause->shrink_to_fit();
-            variables = std::max(variables, (unsigned int)clause->back().var());
-        }
-        formula.push_back(clause);
+    /// Normalizes and adds the clause. @return false if it was dropped as a tautology
+    bool addClause(std::span<const Lit> clause) {
+        buffer_.assign(clause.begin(), clause.end());
+        if (!normalize(buffer_)) return false;
+        if (!buffer_.empty()) ensureVars(buffer_.back().var().id());
+        clauses_.add(buffer_);
+        return true;
     }
+
+    /**
+     * @brief Sorts the literals, removes duplicates.
+     * @return false if the clause is a tautology
+     */
+    static bool normalize(Cl& clause) {
+        std::sort(clause.begin(), clause.end());
+        clause.erase(std::unique(clause.begin(), clause.end()), clause.end());
+        for (std::size_t i = 1; i < clause.size(); ++i) {
+            if (clause[i - 1].var() == clause[i].var()) return false;
+        }
+        return true;
+    }
+
+ private:
+    ClauseArena clauses_;
+    unsigned variables_ = 0;
+    Cl buffer_;  ///< scratch space for normalization
 };
 
+}  // namespace propan
