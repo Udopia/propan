@@ -1,129 +1,132 @@
-/*************************************************************************************************
-WCNFFormula -- Copyright (c) 2021, Ashlin Iser, KIT - Karlsruhe Institute of Technology
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2021 Ashlin Iser, KIT - Karlsruhe Institute of Technology
 
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
-associated documentation files (the "Software"), to deal in the Software without restriction,
-including without limitation the rights to use, copy, modify, merge, publish, distribute,
-sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or
-substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
-NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
-NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
-DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT
-OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- **************************************************************************************************/
+/**
+ * @file wcnf_formula.h
+ * @brief Weighted CNF formula (MaxSAT): hard clauses and weighted soft clauses.
+ */
 
 #pragma once
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <span>
+#include <utility>
+#include <vector>
+
+#include "propan/cnf_formula.h"
 #include "propan/solver_types.h"
 #include "propan/stream_buffer.h"
 
+namespace propan {
+
+/**
+ * @brief A weighted CNF formula: hard clauses and soft clauses with weights.
+ *
+ * Hard and soft clauses are kept in two CNFFormula objects, which share the
+ * variable range `1..nVars()`. The i-th soft clause has weight `weights()[i]`.
+ * Clauses are normalized as in CNFFormula; dropped tautologies get no weight.
+ * The formula is a value type: copies are deep, moves leave the source empty.
+ */
 class WCNFFormula {
  public:
-    For hard_formula;
-    For soft_formula;
-    std::vector<uint64_t> soft_weights;
-    unsigned variables;
+    WCNFFormula() = default;
 
-    WCNFFormula() : hard_formula(), soft_formula(), variables(0) { }
+    /**
+     * @brief Reads a WCNF file, possibly compressed.
+     * @throw ParserException on I/O or format errors
+     */
+    explicit WCNFFormula(const char* filename) { readDimacsFromFile(filename); }
 
-    WCNFFormula(const char* filename) : WCNFFormula() {
-        readDimacsFromFile(filename);
-    }
+    WCNFFormula(const WCNFFormula&) = default;
+    WCNFFormula& operator=(const WCNFFormula&) = default;
 
-    WCNFFormula(const WCNFFormula&) = delete;
-    WCNFFormula& operator=(const WCNFFormula&) = delete;
-
+    /// Leaves `other` empty.
     WCNFFormula(WCNFFormula&& other) noexcept
-        : hard_formula(std::move(other.hard_formula)), soft_formula(std::move(other.soft_formula)),
-          soft_weights(std::move(other.soft_weights)), variables(other.variables) {
-        other.hard_formula.clear();
-        other.soft_formula.clear();
-        other.soft_weights.clear();
-        other.variables = 0;
-    }
+        : hard_(std::move(other.hard_)), soft_(std::move(other.soft_)),
+          weights_(std::exchange(other.weights_, {})) { }
 
+    /// Leaves `other` empty.
     WCNFFormula& operator=(WCNFFormula&& other) noexcept {
         if (this != &other) {
-            clear();
-            hard_formula = std::move(other.hard_formula);
-            soft_formula = std::move(other.soft_formula);
-            soft_weights = std::move(other.soft_weights);
-            variables = other.variables;
-            other.hard_formula.clear();
-            other.soft_formula.clear();
-            other.soft_weights.clear();
-            other.variables = 0;
+            hard_ = std::move(other.hard_);
+            soft_ = std::move(other.soft_);
+            weights_ = std::exchange(other.weights_, {});
         }
         return *this;
     }
 
-    ~WCNFFormula() {
-        clear();
+    /// The hard clauses.
+    const CNFFormula& hard() const noexcept { return hard_; }
+
+    /// The hard clauses; e.g. `CNFFormula f = std::move(w.hard());`.
+    CNFFormula& hard() noexcept { return hard_; }
+
+    /// The soft clauses.
+    const CNFFormula& soft() const noexcept { return soft_; }
+
+    /// The soft clauses.
+    CNFFormula& soft() noexcept { return soft_; }
+
+    /// Weights of the soft clauses.
+    const std::vector<uint64_t>& weights() const noexcept { return weights_; }
+
+    /// Number of variables (maximum variable id).
+    unsigned nVars() const noexcept { return std::max(hard_.nVars(), soft_.nVars()); }
+
+    /// Total number of clauses.
+    std::size_t nClauses() const noexcept { return hard_.nClauses() + soft_.nClauses(); }
+
+    /// Number of hard clauses.
+    std::size_t nHardClauses() const noexcept { return hard_.nClauses(); }
+
+    /// Number of soft clauses.
+    std::size_t nSoftClauses() const noexcept { return soft_.nClauses(); }
+
+    /// Adds a fresh variable and returns its id.
+    unsigned newVar() noexcept {
+        unsigned v = hard_.newVar();
+        soft_.ensureVars(v);
+        return v;
     }
 
-    typedef For::const_iterator const_iterator;
-
-    inline const_iterator hard_begin() const {
-        return hard_formula.begin();
+    /// Ensures that variables `1..n` exist.
+    void ensureVars(unsigned n) noexcept {
+        hard_.ensureVars(n);
+        soft_.ensureVars(n);
     }
 
-    inline const_iterator hard_end() const {
-        return hard_formula.end();
+    /// Removes all clauses, weights and variables.
+    void clear() noexcept {
+        hard_.clear();
+        soft_.clear();
+        weights_.clear();
     }
 
-    inline const_iterator soft_begin() const {
-        return soft_formula.begin();
+    /// Normalizes and adds a hard clause. @return false if it was dropped as a tautology
+    bool addHardClause(std::span<const Lit> clause) {
+        bool added = hard_.addClause(clause);
+        ensureVars(std::max(hard_.nVars(), soft_.nVars()));
+        return added;
     }
 
-    inline const_iterator soft_end() const {
-        return soft_formula.end();
-    }
-
-    inline const Cl* operator[] (int i) const {
-        if (i < hard_formula.size()) return hard_formula[i];
-        i -= hard_formula.size();
-        return soft_formula[i];
-    }
-
-    inline size_t nVars() const {
-        return variables;
-    }
-
-    inline size_t nClauses() const {
-        return hard_formula.size() + soft_formula.size();
-    }
-
-    inline size_t nHardClauses() const {
-        return hard_formula.size();
-    }
-
-    inline size_t nSoftClauses() const {
-        return soft_formula.size();
-    }
-
-    inline int newVar() {
-        return ++variables;
-    }
-
-    inline void clear() {
-        for (Cl* clause : hard_formula) delete clause;
-        for (Cl* clause : soft_formula) delete clause;
-        hard_formula.clear();
-        soft_formula.clear();
-        soft_weights.clear();
-        variables = 0;
+    /// Normalizes and adds a soft clause. @return false if it was dropped as a tautology
+    bool addSoftClause(std::span<const Lit> clause, uint64_t weight) {
+        bool added = soft_.addClause(clause);
+        if (added) weights_.push_back(weight);
+        ensureVars(std::max(hard_.nVars(), soft_.nVars()));
+        return added;
     }
 
     /**
-     * Reads both the pre-2022 format (header "p wcnf <vars> <clauses> <top>", clauses with
-     * weight >= top are hard) and the 2022 MaxSAT Evaluation format (no header, hard clauses
-     * start with 'h').
+     * @brief Reads clauses from a WCNF file, possibly compressed, and adds them.
+     *
+     * Supports both the pre-2022 format (header `p wcnf <vars> <clauses> [<top>]`,
+     * clauses with weight >= top are hard; without top all clauses are soft)
+     * and the 2022 MaxSAT Evaluation format (no header, hard clauses start
+     * with 'h').
+     * @throw ParserException on I/O or format errors
      */
     void readDimacsFromFile(const char* filename) {
         StreamBuffer in(filename);
@@ -134,12 +137,12 @@ class WCNFFormula {
             if (*in == 'p' || *in == 'c') {
                 if (*in == 'p') {
                     in.skipString("p wcnf");
-                    int vars, dummy;
+                    int vars, n_clauses;
                     if (in.readInteger(&vars) && vars > 0) {
-                        variables = std::max(variables, static_cast<unsigned>(vars));
+                        ensureVars(static_cast<unsigned>(vars));
                     }
-                    in.readInteger(&dummy);  // skip number of clauses
-                    has_top = in.readUInt64(&top);
+                    in.readInteger(&n_clauses);
+                    has_top = in.skipBlanks() && in.readUInt64(&top);
                 }
                 if (!in.skipLine()) break;
             } else {
@@ -155,43 +158,22 @@ class WCNFFormula {
                 int plit;
                 while (in.readInteger(&plit)) {
                     if (plit == 0) break;
-                    clause.push_back(Lit(abs(plit), plit < 0));
+                    clause.push_back(Lit::fromDimacs(plit));
                 }
                 if (hard) {
-                    readClause(clause.begin(), clause.end(), hard_formula);
-                } else if (readClause(clause.begin(), clause.end(), soft_formula)) {
-                    soft_weights.push_back(weight);
+                    addHardClause(clause);
+                } else {
+                    addSoftClause(clause, weight);
                 }
                 clause.clear();
             }
         }
     }
 
-    /// Normalizes and adds a clause; returns false if it was dropped as a tautology.
-    template <typename Iterator>
-    bool readClause(Iterator begin, Iterator end, For& formula) {
-        Cl* clause = new Cl { begin, end };
-        if (clause->size() > 0) {
-            // remove redundant literals
-            std::sort(clause->begin(), clause->end());
-            unsigned dup = 0;
-            for (auto it = clause->begin(), jt = clause->begin()+1; jt != clause->end(); ++jt) {
-                if (*it != *jt) {  // unique
-                    if (it->var() == jt->var()) {
-                        delete clause;
-                        return false;  // no tautologies
-                    }
-                    ++it;
-                    *it = *jt;
-                } else {
-                    ++dup;
-                }
-            }
-            clause->resize(clause->size() - dup);
-            clause->shrink_to_fit();
-            variables = std::max(variables, (unsigned int)clause->back().var());
-        }
-        formula.push_back(clause);
-        return true;
-    }
+ private:
+    CNFFormula hard_;
+    CNFFormula soft_;
+    std::vector<uint64_t> weights_;
 };
+
+}  // namespace propan

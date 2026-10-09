@@ -4,11 +4,27 @@
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
+#include <span>
 #include <string>
 
 #include <unistd.h>
 
+#include "propan/solver_types.h"
+
 namespace test {
+
+/// Clause from DIMACS literals.
+inline propan::Cl lits(std::initializer_list<int> dimacs) {
+    propan::Cl c;
+    for (int d : dimacs) c.push_back(propan::Lit::fromDimacs(d));
+    return c;
+}
+
+/// Owning copy of a clause view, for comparisons in checks.
+inline propan::Cl asCl(std::span<const propan::Lit> clause) {
+    return { clause.begin(), clause.end() };
+}
 
 /// Path of a file in tests/data.
 inline std::string data(const std::string& name) {

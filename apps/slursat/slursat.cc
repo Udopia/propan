@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <cmath>
 
+using namespace propan;
+
 double calculate_mean(const std::vector<int>& data) {
     return std::accumulate(data.begin(), data.end(), 0.0) / data.size();
 }
@@ -49,7 +51,7 @@ bool slurpk(std::vector<Lit> lits, Trail& trail, unsigned k) {
             trail.newLevel();
             unsigned c = 0, j = 0;
             while (c < k && i + j < lits.size()) {
-                while (i + j < lits.size() && trail.value(lits[i + j].var()) != trail.UNASSIGNED) {
+                while (i + j < lits.size() && trail.value(lits[i + j].var()) != VAL_UNASSIGNED) {
                     ++j;
                 }
                 if (i + j >= lits.size()) break;
@@ -78,7 +80,7 @@ bool slurk(std::vector<Lit> lits, Trail& trail, unsigned k) {
             trail.newLevel();
             unsigned c = 0, j = 0;
             while (c < k && i + j < lits.size()) {
-                while (i + j < lits.size() && trail.value(lits[i + j].var()) != trail.UNASSIGNED) {
+                while (i + j < lits.size() && trail.value(lits[i + j].var()) != VAL_UNASSIGNED) {
                     ++j;
                 }
                 if (i + j >= lits.size()) break;
@@ -97,7 +99,7 @@ bool slurk(std::vector<Lit> lits, Trail& trail, unsigned k) {
 // SLUR algorithm
 bool slursat(std::vector<Lit> lits, Trail& trail) {
     for (Lit lit : lits) {
-        if (trail.value(lit.var()) == trail.UNASSIGNED) {
+        if (trail.value(lit.var()) == VAL_UNASSIGNED) {
             trail.newLevel();
             trail.push(lit);
             if (!trail.propagate()) {
@@ -121,8 +123,8 @@ int main(int argc, char **argv) {
 
     CNFFormula formula;
     if (std::string(argv[1]).find(".wcnf") != std::string::npos) {
-        WCNFFormula wformula = WCNFFormula(argv[1]);
-        formula = CNFFormula(wformula.hard_formula, wformula.nVars());
+        WCNFFormula wformula(argv[1]);
+        formula = std::move(wformula.hard());
     } else {
         formula = CNFFormula(argv[1]);
     }
@@ -167,11 +169,11 @@ int main(int argc, char **argv) {
         std::cout << "c GAVE UP" << std::endl;
     }
 
-    double fraction = (double)formula.nVars() / trail.trail.size();
+    double fraction = (double)formula.nVars() / trail.size();
 
     std::vector<int> differences;
-    for (size_t i = 1; i < trail.trail_lim.size(); ++i) {
-        differences.push_back(trail.trail_lim[i] - trail.trail_lim[i - 1]);
+    for (unsigned i = 1; i <= trail.level(); ++i) {
+        differences.push_back(static_cast<int>(trail.levelStart(i) - trail.levelStart(i - 1)));
     }
     std::sort(differences.begin(), differences.end());
     if (differences.empty()) {

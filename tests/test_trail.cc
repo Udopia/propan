@@ -7,6 +7,8 @@
 #include "propan/trail.h"
 #include "test_util.h"
 
+using namespace propan;
+
 namespace {
 
 Lit L(int d) { return Lit(std::abs(d), d < 0); }
@@ -16,7 +18,7 @@ CNFFormula cnf(std::initializer_list<std::initializer_list<int>> clauses) {
     for (auto& c : clauses) {
         Cl cl;
         for (int d : c) cl.push_back(L(d));
-        f.readClause(cl.begin(), cl.end());
+        f.addClause(cl);
     }
     return f;
 }
@@ -24,23 +26,26 @@ CNFFormula cnf(std::initializer_list<std::initializer_list<int>> clauses) {
 /// Literal is assigned true on the trail.
 bool isTrue(Trail& t, int d) {
     Lit l = L(d);
-    return t.value(l.var()) == (l.sign() ? t.FALSE : t.TRUE);
+    return t.value(l) == VAL_TRUE;
 }
 
 /// Trail invariants: every trail literal is true, no variable occurs twice,
 /// every assigned variable is on the trail, level limits are monotone.
-void checkInvariants(Trail& t) {
-    std::vector<int> seen(t.val.size(), 0);
-    for (int i = 0; i < t.size(); ++i) {
+void checkInvariants(const Trail& t) {
+    std::vector<int> seen(t.nVars() + 1, 0);
+    for (size_t i = 0; i < t.size(); ++i) {
         Lit l = t[i];
-        CHECK(t.value(l.var()) == (l.sign() ? t.FALSE : t.TRUE));
+        CHECK(t.value(l) == VAL_TRUE);
         CHECK(seen[l.var()]++ == 0);
     }
-    for (size_t v = 1; v < t.val.size(); ++v) {
-        CHECK((t.val[v] != t.UNASSIGNED) == (seen[v] == 1));
+    for (unsigned v = 1; v <= t.nVars(); ++v) {
+        CHECK((t.value(Var(v)) != VAL_UNASSIGNED) == (seen[v] == 1));
     }
-    CHECK(std::is_sorted(t.trail_lim.begin(), t.trail_lim.end()));
-    if (!t.trail_lim.empty()) CHECK(t.trail_lim.back() <= unsigned(t.size()));
+    CHECK(t.levelStart(0) == 0);
+    for (unsigned l = 1; l <= t.level(); ++l) {
+        CHECK(t.levelStart(l - 1) <= t.levelStart(l));
+    }
+    CHECK(t.levelStart(t.level()) <= t.size());
 }
 
 }  // namespace
@@ -52,7 +57,7 @@ TEST_CASE("init without units leaves everything unassigned") {
     Trail t;
     CHECK(t.init(f));
     CHECK(t.size() == 0);
-    for (unsigned v = 1; v <= f.nVars(); ++v) CHECK(t.value(Var(v)) == t.UNASSIGNED);
+    for (unsigned v = 1; v <= f.nVars(); ++v) CHECK(t.value(Var(v)) == VAL_UNASSIGNED);
     checkInvariants(t);
 }
 
@@ -106,6 +111,23 @@ TEST_CASE("push assigns, accepts repeated and rejects contradicting literals") {
     CHECK(t.size() == 1);
     CHECK(isTrue(t, 1));
     checkInvariants(t);
+}
+
+TEST_CASE("value of a negative literal is the negated value of its variable") {
+    CNFFormula f = cnf({ { 1, 2, 3 } });
+    Trail t;
+    REQUIRE(t.init(f));
+    CHECK(t.value(L(1)) == VAL_UNASSIGNED);
+    CHECK(t.value(L(-1)) == VAL_UNASSIGNED);
+    REQUIRE(t.push(L(1)));
+    REQUIRE(t.push(L(-2)));
+    CHECK(t.value(Var(1)) == VAL_TRUE);
+    CHECK(t.value(Var(2)) == VAL_FALSE);
+    CHECK(t.value(L(1)) == VAL_TRUE);
+    CHECK(t.value(L(-1)) == VAL_FALSE);
+    CHECK(t.value(L(2)) == VAL_FALSE);
+    CHECK(t.value(L(-2)) == VAL_TRUE);
+    CHECK(t.value(L(3)) == VAL_UNASSIGNED);
 }
 
 TEST_CASE("propagate follows implication chains") {
@@ -193,13 +215,13 @@ TEST_CASE("backtrack undoes exactly the last level") {
     CHECK(isTrue(t, 1));
     CHECK(isTrue(t, 2));
     CHECK(isTrue(t, 3));
-    CHECK(t.value(Var(4)) == t.UNASSIGNED);
-    CHECK(t.value(Var(5)) == t.UNASSIGNED);
+    CHECK(t.value(Var(4)) == VAL_UNASSIGNED);
+    CHECK(t.value(Var(5)) == VAL_UNASSIGNED);
     checkInvariants(t);
 
     CHECK(t.backtrack());
     CHECK(t.size() == 1);
-    CHECK(t.value(Var(2)) == t.UNASSIGNED);
+    CHECK(t.value(Var(2)) == VAL_UNASSIGNED);
     checkInvariants(t);
 }
 
