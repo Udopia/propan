@@ -4,6 +4,9 @@
  * @license MIT
  */
 
+#ifndef PROPAN_TRAIL_H_
+#define PROPAN_TRAIL_H_
+
 #include <vector>
 #include "propan/solver_types.h"
 #include "propan/cnf_formula.h"
@@ -24,30 +27,40 @@ public:
     const uint8_t TRUE = 1;
     const uint8_t FALSE = 2;
 
-    Trail() : occ(), val(), trail(), trail_lim() { }
+    Trail() : trail(), trail_lim(), val(), occ() { }
 
     void clear() {
         occ.clear();
         val.clear();
         trail.clear();
         trail_lim.clear();
+        head = 0;
     }
 
+    /**
+     * Initializes the trail for the given formula: builds occurrence lists, assigns unit clauses
+     * on the root level (level 0, which cannot be backtracked) and propagates them.
+     * @return false if the formula is refuted by unit propagation (or contains the empty clause)
+     */
     bool init(CNFFormula& formula) {
         clear();
         occ.resize(2*formula.nVars()+2);
         val.resize(formula.nVars()+1);
         trail_lim.push_back(0);
+        bool ok = true;
         for (Cl* cls : formula) {
-            if (cls->size() == 1) {
-                if (verb) std::cout << "Unit clause: " << *cls << std::endl;
-                if (!push((*cls)[0])) return false;
-            }
+            if (cls->empty()) ok = false;
             for (Lit lit : *cls) {
                 occ[lit].push_back(cls);
             }
         }
-        return propagate();
+        for (Cl* cls : formula) {
+            if (ok && cls->size() == 1) {
+                if (verb) std::cout << "Unit clause: " << *cls << std::endl;
+                ok = push((*cls)[0]);
+            }
+        }
+        return ok && propagate();
     }
 
     bool propagate() {
@@ -77,7 +90,7 @@ public:
                         count++;
                     }
                 }
-                if (unit != 0 && !push(unit) || count == cls->size()) {
+                if ((unit != 0 && !push(unit)) || count == cls->size()) {
                     return false;
                 }
             }
@@ -111,8 +124,12 @@ public:
         trail_lim.push_back(trail.size());
     }
 
+    /**
+     * Undoes all assignments of the current decision level.
+     * @return false (and does nothing) on the root level
+     */
     bool backtrack() {
-        if (!trail_lim.empty()) {
+        if (trail_lim.size() > 1) {
             if (verb) std::cout << "Backtracking to position " << trail_lim.back() << std::endl;
             for (int i = trail.size()-1; i >= (int)trail_lim.back(); i--) {
                 if (verb) std::cout << "Unassigning " << trail[i] << " at position " << i << std::endl;
@@ -159,3 +176,5 @@ public:
         return true;
     }
 };
+
+#endif  // PROPAN_TRAIL_H_

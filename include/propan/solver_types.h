@@ -81,7 +81,7 @@ struct Lit {
         return Lit(var(), true);
     }
 
-    inline int toDimacs() {
+    inline int toDimacs() const {
         if (sign()) {
             return (-1)*var();
         } else {
