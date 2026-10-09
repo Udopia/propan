@@ -13,6 +13,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(PROPAN_BUILD_APPS "Build applications (slursat, ...)" ${PROJECT_IS_TOP_LEVEL})
+option(PROPAN_BUILD_TESTS "Build unit and application tests" ${PROJECT_IS_TOP_LEVEL})
 
 find_package(LibArchive REQUIRED)
 
@@ -31,4 +32,9 @@ target_compile_options(propan_warnings INTERFACE
 
 if(PROPAN_BUILD_APPS)
     add_subdirectory(apps)
+endif()
+
+if(PROPAN_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
 endif()

@@ -174,6 +174,9 @@ int main(int argc, char **argv) {
         differences.push_back(trail.trail_lim[i] - trail.trail_lim[i - 1]);
     }
     std::sort(differences.begin(), differences.end());
+    if (differences.empty()) {
+        return 0;
+    }
     
     double mean = std::accumulate(differences.begin(), differences.end(), 0.0) / differences.size();
     double median = differences[differences.size() / 2];

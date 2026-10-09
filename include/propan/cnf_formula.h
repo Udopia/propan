@@ -30,7 +30,12 @@ class CNFFormula {
 
     CNFFormula() : formula(), variables(0) { }
 
-    CNFFormula(For f, unsigned vars) : formula(f), variables(vars) { }
+    /// Construct from clauses (deep copy, the caller keeps ownership of the given clauses)
+    CNFFormula(const For& f, unsigned vars) : formula(), variables(vars) {
+        for (const Cl* clause : f) {
+            formula.push_back(new Cl(*clause));
+        }
+    }
 
     CNFFormula(const char* filename) : CNFFormula() {
         readDimacsFromFile(filename);
@@ -58,13 +63,24 @@ class CNFFormula {
     // Move constructor
     CNFFormula(CNFFormula&& other) noexcept
         : formula(std::move(other.formula)), variables(other.variables) {
+        other.formula.clear();
         other.variables = 0; // Leave `other` in a valid state
     }
 
-    ~CNFFormula() {
-        for (Cl* clause : formula) {
-            delete clause;
+    // Move assignment operator
+    CNFFormula& operator=(CNFFormula&& other) noexcept {
+        if (this != &other) {
+            clear();
+            formula = std::move(other.formula);
+            variables = other.variables;
+            other.formula.clear();
+            other.variables = 0;
         }
+        return *this;
+    }
+
+    ~CNFFormula() {
+        clear();
     }
 
     typedef For::const_iterator const_iterator;
@@ -94,7 +110,11 @@ class CNFFormula {
     }
 
     inline void clear() {
+        for (Cl* clause : formula) {
+            delete clause;
+        }
         formula.clear();
+        variables = 0;
     }
 
     void readDimacsFromFile(const char* filename) {
@@ -102,6 +122,13 @@ class CNFFormula {
         Cl clause;
         while (in.skipWhitespace()) {
             if (*in == 'p' || *in == 'c') {
+                if (*in == 'p') {
+                    in.skipString("p cnf");
+                    int vars;
+                    if (in.readInteger(&vars) && vars > 0) {
+                        variables = std::max(variables, static_cast<unsigned>(vars));
+                    }
+                }
                 if (!in.skipLine()) break;
             } else {
                 int plit;

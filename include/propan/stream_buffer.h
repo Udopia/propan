@@ -88,20 +88,37 @@ class StreamBuffer {
     explicit StreamBuffer(const char* filename) : buffer_size(16384), pos(0), end(0), end_of_file(false), filename_(filename) {
         file = archive_read_new();
         archive_read_support_filter_all(file);
-        // archive_read_support_format_raw(file);
         archive_read_support_format_raw(file);
+        archive_read_support_format_empty(file);
         int r = archive_read_open_filename(file, filename, buffer_size);
         if (r != ARCHIVE_OK) {
-            throw ParserException(std::string(archive_error_string(file)) + std::string(" Error opening file: ") + std::string(filename));
+            std::string msg = std::string(archive_error_string(file)) + " Error opening file: " + filename;
+            archive_read_free(file);
+            throw ParserException(msg);
         }
         struct archive_entry *entry;
         r = archive_read_next_header(file, &entry);
+        if (r == ARCHIVE_EOF) {  // empty input
+            buffer = new char[buffer_size]();
+            end_of_file = true;
+            return;
+        }
         if (r != ARCHIVE_OK) {
-            throw ParserException(std::string("Error reading header: ") + std::string(filename));
+            archive_read_free(file);
+            throw ParserException(std::string("Error reading header: ") + filename);
         }
         buffer = new char[buffer_size];
-        refill_buffer();
+        try {
+            refill_buffer();
+        } catch (...) {
+            archive_read_free(file);
+            delete[] buffer;
+            throw;
+        }
     }
+
+    StreamBuffer(const StreamBuffer&) = delete;
+    StreamBuffer& operator=(const StreamBuffer&) = delete;
 
     ~StreamBuffer() {
         archive_read_free(file);
@@ -145,8 +162,8 @@ class StreamBuffer {
             if (!skip(false)) return false;
         }
         // manually align buffer after line is skipped to be able to skip lines
-        // with words longer than the stream buffer
-        align_buffer();
+        // with words longer than the stream buffer (at eof there is nothing left to align)
+        if (!end_of_file) align_buffer();
         return skipWhitespace();
     }
 
