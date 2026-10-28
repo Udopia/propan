@@ -26,8 +26,8 @@ namespace propan {
  * Clauses are normalized when added: literals are sorted by index, duplicate
  * literals are removed and tautologies are dropped. The empty clause is kept.
  *
- * Iteration yields the clauses as `std::span<const Lit>` in insertion order;
- * clauses() gives access to the underlying ClauseArena and its references.
+ * Iteration yields const clause views in physical arena order.
+ * clauses() gives access to the underlying ClauseArena and its ID mapping.
  * The formula is a value type: copies are deep, moves leave the source empty.
  */
 class CNFFormula {
@@ -61,11 +61,11 @@ class CNFFormula {
     const_iterator begin() const { return clauses_.begin(); }
     const_iterator end() const { return clauses_.end(); }
 
-    /// Literals of the i-th clause.
-    std::span<const Lit> operator[](std::size_t i) const { return clauses_[i]; }
+    /// Clause with the given stable ID (must be live).
+    ConstClauseView operator[](ClauseId id) const { return clauses_[id]; }
 
-    /// Literals of the referenced clause.
-    std::span<const Lit> operator[](ClauseRef ref) const { return clauses_[ref]; }
+    /// Clause at the given offset (must be live).
+    ConstClauseView operator[](ClauseRef ref) const { return clauses_[ref]; }
 
     /// The underlying clause storage.
     const ClauseArena& clauses() const noexcept { return clauses_; }

@@ -56,7 +56,7 @@ class Trail {
      *
      * Builds the occurrence lists, assigns the unit clauses on level 0 and
      * propagates them. The formula must outlive the trail (or the next call
-     * to init()).
+     * to init()) and must not be modified while the trail uses it.
      * @return false if the formula is refuted by unit propagation (or contains the empty clause)
      */
     bool init(const CNFFormula& formula) {
@@ -65,15 +65,13 @@ class Trail {
         occ_.resize(2 * formula.nVars() + 2);
         val_.resize(formula.nVars() + 1);
         bool ok = true;
-        for (ClauseRef ref : clauses_->refs()) {
-            std::span<const Lit> clause = (*clauses_)[ref];
+        for (auto clause : *clauses_) {
             if (clause.empty()) ok = false;
             for (Lit lit : clause) {
-                occ_[lit].push_back(ref);
+                occ_[lit].push_back(clause.ref());
             }
         }
-        for (ClauseRef ref : clauses_->refs()) {
-            std::span<const Lit> clause = (*clauses_)[ref];
+        for (auto clause : *clauses_) {
             if (ok && clause.size() == 1) {
                 ok = push(clause[0]);
             }

@@ -25,7 +25,7 @@ namespace propan {
  * @brief A weighted CNF formula: hard clauses and soft clauses with weights.
  *
  * Hard and soft clauses are kept in two CNFFormula objects, which share the
- * variable range `1..nVars()`. The i-th soft clause has weight `weights()[i]`.
+ * variable range `1..nVars()`. A soft clause's weight is `weights()[clause.id().index()]`.
  * Clauses are normalized as in CNFFormula; dropped tautologies get no weight.
  * The formula is a value type: copies are deep, moves leave the source empty.
  */

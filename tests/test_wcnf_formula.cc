@@ -21,10 +21,10 @@ TEST_CASE("pre-2022 format: weight >= top marks hard clauses") {
     REQUIRE(f.nHardClauses() == 2);
     REQUIRE(f.nSoftClauses() == 2);
     CHECK(f.nClauses() == 4);
-    CHECK(asCl(f.hard()[0]) == lits({ 1, 2 }));
-    CHECK(asCl(f.hard()[1]) == lits({ -1, 3 }));
-    CHECK(asCl(f.soft()[0]) == lits({ -3 }));
-    CHECK(asCl(f.soft()[1]) == lits({ -2 }));
+    CHECK(asCl(f.hard()[ClauseId(0)]) == lits({ 1, 2 }));
+    CHECK(asCl(f.hard()[ClauseId(1)]) == lits({ -1, 3 }));
+    CHECK(asCl(f.soft()[ClauseId(0)]) == lits({ -3 }));
+    CHECK(asCl(f.soft()[ClauseId(1)]) == lits({ -2 }));
     CHECK(f.weights() == std::vector<uint64_t> { 3, 5 });
 }
 
@@ -35,7 +35,7 @@ TEST_CASE("pre-2022 format: header without top weight makes all clauses soft") {
     CHECK(f.nHardClauses() == 0);
     REQUIRE(f.nSoftClauses() == 2);
     CHECK(f.weights() == std::vector<uint64_t> { 4, 7 });
-    CHECK(asCl(f.soft()[0]) == lits({ 1, -2 }));
+    CHECK(asCl(f.soft()[ClauseId(0)]) == lits({ 1, -2 }));
 }
 
 TEST_CASE("2022 format: 'h' marks hard clauses") {
@@ -90,19 +90,19 @@ TEST_CASE("hard part can be moved out as a CNFFormula") {
     }
     CHECK(f.nVars() == 3);
     REQUIRE(f.nClauses() == 2);
-    CHECK(asCl(f[1]) == lits({ -1, 3 }));
+    CHECK(asCl(f[ClauseId(1)]) == lits({ -1, 3 }));
 }
 
 TEST_CASE("moves transfer all clauses and leave the source empty") {
     WCNFFormula f(test::data("sample_old.wcnf").c_str());
-    const Lit* hard0 = f.hard()[0].data();
+    const Lit* hard0 = f.hard()[ClauseId(0)].data();
     WCNFFormula g(std::move(f));
-    CHECK(g.hard()[0].data() == hard0);
+    CHECK(g.hard()[ClauseId(0)].data() == hard0);
     CHECK(f.nClauses() == 0);
     CHECK(f.weights().empty());
     WCNFFormula h;
     h = std::move(g);
-    CHECK(h.hard()[0].data() == hard0);
+    CHECK(h.hard()[ClauseId(0)].data() == hard0);
     CHECK(h.nClauses() == 4);
     CHECK(h.weights().size() == 2);
     CHECK(g.nClauses() == 0);
@@ -112,7 +112,7 @@ TEST_CASE("copies are deep") {
     WCNFFormula f(test::data("sample_old.wcnf").c_str());
     WCNFFormula g(f);
     CHECK(g.nClauses() == 4);
-    CHECK(g.hard()[0].data() != f.hard()[0].data());
+    CHECK(g.hard()[ClauseId(0)].data() != f.hard()[ClauseId(0)].data());
     CHECK(g.weights() == f.weights());
 }
 
