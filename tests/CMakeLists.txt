@@ -1,10 +1,6 @@
-include(FetchContent)
-FetchContent_Declare(doctest
-    URL https://github.com/doctest/doctest/archive/refs/tags/v2.4.12.tar.gz
-    URL_HASH SHA256=73381c7aa4dee704bd935609668cf41880ea7f19fa0504a200e13b74999c2d70
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-FetchContent_MakeAvailable(doctest)
-include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)
+add_library(propan_doctest INTERFACE)
+target_include_directories(propan_doctest SYSTEM INTERFACE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../third_party")
 
 # Unit tests
 add_executable(propan_tests
@@ -15,10 +11,10 @@ add_executable(propan_tests
     test_cnf_formula.cc
     test_wcnf_formula.cc
     test_trail.cc)
-target_link_libraries(propan_tests PRIVATE propan::propan propan_warnings doctest::doctest)
+target_link_libraries(propan_tests PRIVATE propan::propan propan_warnings propan_doctest)
 target_compile_definitions(propan_tests PRIVATE
     PROPAN_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
-doctest_discover_tests(propan_tests)
+add_test(NAME propan_tests COMMAND propan_tests)
 
 # End-to-end tests of applications
 if(PROPAN_BUILD_APPS)

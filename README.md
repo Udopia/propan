@@ -14,7 +14,9 @@ cmake --build build
 
 ## Testing
 
-Unit tests use [doctest](https://github.com/doctest/doctest) (fetched by CMake); applications are tested end-to-end via CTest.
+Unit tests use [doctest](https://github.com/doctest/doctest) 2.4.12, vendored in
+[`third_party/doctest`](third_party/doctest) with its license. No download is needed.
+CTest runs unit tests as one suite and applications end-to-end.
 
 ```sh
 cmake -S . -B build
