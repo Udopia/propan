@@ -8,11 +8,30 @@
 
 #pragma once
 
-#include <span>
+#include <cstdint>
 
 #include "propan/clause_arena.h"
 
 namespace propan {
+
+/**
+ * @brief Propagation counters, maintained only if compiled with `PROPAN_STATS`
+ * (CMake option of the same name); otherwise all increments compile to nothing
+ * and the counters stay zero.
+ */
+struct PropagationStats {
+    uint64_t propagations = 0;  ///< literals taken from the queue
+    uint64_t visits = 0;        ///< watches or occurrences inspected
+    uint64_t clauses = 0;       ///< clauses whose literals were inspected
+    uint64_t assigned = 0;      ///< literals assigned by propagation
+    uint64_t conflicts = 0;     ///< conflicts found
+};
+
+#ifdef PROPAN_STATS
+#define PROPAN_STAT(counter) (++(counter))
+#else
+#define PROPAN_STAT(counter) ((void)0)
+#endif
 
 /**
  * @brief Unit propagation: maintains clause indexing structures and assigns
@@ -41,7 +60,10 @@ class Propagator {
     virtual void detach(ClauseRef ref) = 0;
 
     /// Updates references after ClauseArena::compact().
-    virtual void relocate(std::span<const ClauseArena::Relocation> relocation) = 0;
+    virtual void relocate(const ClauseArena::Relocation& relocation) = 0;
+
+    /// Extends the per-literal structures to cover variables `1..n_vars` (after Trail::resize()).
+    virtual void resize(unsigned n_vars) = 0;
 
     /**
      * @brief Propagates the trail's queue to fixpoint.
@@ -49,12 +71,11 @@ class Propagator {
      */
     virtual ClauseRef propagate() = 0;
 
-    /// Attaches all clauses of the arena. @return false if any attach() failed
-    bool attachAll(const ClauseArena& clauses) {
-        bool ok = true;
-        for (auto clause : clauses) ok = attach(clause.ref()) && ok;
-        return ok;
-    }
+    /// Counters (all zero unless compiled with PROPAN_STATS).
+    const PropagationStats& stats() const noexcept { return stats_; }
+
+ protected:
+    PropagationStats stats_;
 };
 
 }  // namespace propan

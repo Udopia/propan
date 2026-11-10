@@ -7,61 +7,26 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <initializer_list>
 #include <random>
-#include <utility>
+#include <stdexcept>
 #include <vector>
 
-#include "propan/binary_first_propagator.h"
 #include "propan/cnf_formula.h"
+#include "propan/dimacs.h"
 #include "propan/occurrence_propagator.h"
 #include "propan/trail.h"
-#include "propan/watch_propagator.h"
 #include "test_util.h"
 
 using namespace propan;
 using test::lits;
 
-namespace {
-
-CNFFormula cnf(std::initializer_list<std::initializer_list<int>> clauses) {
-    CNFFormula f;
-    for (auto& c : clauses) {
-        Cl cl;
-        for (int d : c) cl.push_back(Lit(d));
-        f.addClause(cl);
-    }
-    return f;
-}
-
-template<class P>
-struct Solver {
-    CNFFormula f;
-    Trail t;
-    P p;
-
-    explicit Solver(CNFFormula formula) : f(std::move(formula)), t(f.nVars()), p(f.clauses(), t) { }
-
-    bool init() { return p.attachAll(f.clauses()) && ok(); }
-    bool ok() { return p.propagate() == ClauseRef(); }
-    bool isTrue(int d) const { return t.value(Lit(d)) == VAL_TRUE; }
-    bool complete() const {
-        for (unsigned v = 1; v <= t.nVars(); ++v) {
-            if (t.value(Var(v)) == VAL_UNASSIGNED) return false;
-        }
-        return true;
-    }
-};
-
-#define PROPAGATORS OccurrencePropagator, WatchPropagator, BinaryFirstPropagator
-
-}  // namespace
+using test::cnf;
 
 TEST_SUITE("use_cases") {
 
 TEST_CASE_TEMPLATE("SLUR(k): blocks of decisions, all polarity vectors of a block on one level", P, PROPAGATORS) {
     // Horn-like chain: x1 -> x2 -> x3 -> x4, plus a clause forcing the last block.
-    Solver<P> s(cnf({ { -1, 2 }, { -2, 3 }, { -3, 4 }, { -4, -5, 6 }, { 5, 6 }, { -6, 7 } }));
+    test::Fixture<P> s(cnf({ { -1, 2 }, { -2, 3 }, { -3, 4 }, { -4, -5, 6 }, { 5, 6 }, { -6, 7 } }));
     REQUIRE(s.init());
     const std::vector<Lit> order = lits({ 1, 5, 3, 7, 2, 4, 6 });
     const unsigned k = 2;
@@ -92,7 +57,7 @@ TEST_CASE_TEMPLATE("SLUR(k): blocks of decisions, all polarity vectors of a bloc
 
 TEST_CASE_TEMPLATE("failed literal probing with lifting of common implications", P, PROPAGATORS) {
     // x1 fails: x1 -> x2, x1 -> -x2. Both polarities of x3 imply x4 (lifted).
-    Solver<P> s(cnf({ { -1, 2 }, { -1, -2 }, { -3, 4 }, { 3, 4 }, { -4, 5, 6 } }));
+    test::Fixture<P> s(cnf({ { -1, 2 }, { -1, -2 }, { -3, 4 }, { 3, 4 }, { -4, 5, 6 } }));
     REQUIRE(s.init());
     std::vector<int> failed, lifted;
     std::vector<unsigned char> mark(2 * s.t.nVars() + 2, 0);
@@ -144,7 +109,7 @@ TEST_CASE_TEMPLATE("failed literal probing with lifting of common implications",
 
 TEST_CASE_TEMPLATE("MaxSAT probing: soft literals individually and as one block", P, PROPAGATORS) {
     // Hard: at most one of s1, s2 (binary), s3 -> s4 is forbidden with s1, s5 implies the rest.
-    Solver<P> s(cnf({ { -1, -2 }, { -3, 4 }, { -1, -4 }, { -5, 1 }, { -5, 3 } }));
+    test::Fixture<P> s(cnf({ { -1, -2 }, { -3, 4 }, { -1, -4 }, { -5, 1 }, { -5, 3 } }));
     REQUIRE(s.init());
     const std::vector<Lit> softs = lits({ 1, 2, 3, 5 });
     // Individual probes: which soft literals fail, what each one implies.
@@ -188,7 +153,7 @@ TEST_CASE_TEMPLATE("local search repair: push a full assignment, flip on conflic
         c[rng() % 3] = c[rng() % 3].positive();  // at least one positive literal: all-true satisfies it
         f.addClause(c);
     }
-    Solver<P> s(std::move(f));
+    test::Fixture<P> s(std::move(f));
     REQUIRE(s.init());
     std::vector<bool> phase(s.t.nVars() + 1);
     for (unsigned v = 1; v <= s.t.nVars(); ++v) phase[v] = rng() % 2;
@@ -220,7 +185,7 @@ namespace {
 
 /// Minimal CDCL: one decision per level, decision-cut learning, backjump by one level.
 template<class P>
-bool cdcl(Solver<P>& s, unsigned max_conflicts = 10000) {
+bool cdcl(test::Fixture<P>& s, unsigned max_conflicts = 10000) {
     unsigned conflicts = 0;
     for (;;) {
         const ClauseRef conflict = s.p.propagate();
@@ -247,13 +212,13 @@ bool cdcl(Solver<P>& s, unsigned max_conflicts = 10000) {
 
 TEST_CASE_TEMPLATE("minimal CDCL with learned clauses attached at the backjump level", P, PROPAGATORS) {
     SUBCASE("satisfiable") {
-        Solver<P> s(CNFFormula(test::data("sat_small.cnf").c_str()));
+        test::Fixture<P> s(readCnf(test::data("sat_small.cnf").c_str()));
         REQUIRE(s.init());
         CHECK(cdcl(s));
         CHECK(satisfies(s.t, s.f.clauses()));
     }
     SUBCASE("pigeon hole 3 into 2 is refuted") {
-        Solver<P> s(CNFFormula(test::data("php_3_2.cnf").c_str()));
+        test::Fixture<P> s(readCnf(test::data("php_3_2.cnf").c_str()));
         REQUIRE(s.init());
         CHECK_FALSE(cdcl(s));
     }
@@ -268,8 +233,8 @@ TEST_CASE_TEMPLATE("minimal CDCL with learned clauses attached at the backjump l
                 f.addClause(c);
             }
             if (f.nVars() == 0) continue;
-            Solver<OccurrencePropagator> ref(f);
-            Solver<P> s(f);
+            test::Fixture<OccurrencePropagator> ref(f);
+            test::Fixture<P> s(f);
             const bool ok_ref = ref.init() && cdcl(ref);
             const bool ok = s.init() && cdcl(s);
             CHECK(ok == ok_ref);

@@ -25,8 +25,6 @@
 #include <type_traits>
 #include <vector>
 
-#include "propan/solver_types.h"
-
 namespace propan {
 
 /// Error while opening or parsing an input file.
@@ -153,59 +151,9 @@ class StreamBuffer {
         return true;
     }
 
-    /**
-     * @brief Skips the next number (with optional sign) after leading whitespace.
-     * @throw ParserException if the next token is not a number
-     * @return false if the end of the file is reached before a token
-     */
-    bool skipNumber() {
-        if (!skipWhitespace()) return false;
-        pos_ += number().size();
-        return true;
-    }
-
-    /**
-     * @brief Reads the next number as a string of digits after leading whitespace.
-     *
-     * A leading '-' is kept, a leading '+' is dropped. Useful for numbers of
-     * arbitrary length (up to #BUFFER_SIZE).
-     * @param[out] out the digits read
-     * @throw ParserException if the next token is not a number
-     * @return false if the end of the file is reached before a token
-     */
-    bool readNumber(std::string& out) {
-        if (!skipWhitespace()) return false;
-        std::string_view number = this->number();
-        pos_ += number.size();
-        if (number.starts_with('+')) number.remove_prefix(1);
-        out = number;
-        return true;
-    }
-
-    /**
-     * @brief Reads the next DIMACS clause (literals terminated by 0).
-     *
-     * Skips comment lines ('c') and header lines ('p') before the clause. A
-     * clause that is not terminated by 0 at the end of the file is accepted.
-     * @param[out] out the clause read; empty if none was read
-     * @throw ParserException on malformed input
-     * @return false if the end of the file is reached before a clause
-     */
-    bool readClause(Cl& out) {
-        out.clear();
-        if (!skipWhitespace()) return false;
-        while (cur() == 'p' || cur() == 'c') {
-            if (!skipLine()) return false;
-        }
-        int lit;
-        while (read(lit) && lit != 0) out.push_back(Lit(lit));
-        return true;
-    }
-
  private:
     // Locale-independent "C" classification; also well-defined for negative chars.
     static bool isSpace(char c) { return c == ' ' || (c >= '\t' && c <= '\r'); }
-    static bool isDigit(char c) { return c >= '0' && c <= '9'; }
 
     /// Current character. @pre !eof()
     char cur() const { return buf_[pos_]; }
@@ -250,15 +198,6 @@ class StreamBuffer {
             if (space != end) return { begin, space };
             if (!refill()) return { buf_.data() + pos_, buf_.data() + end_ };
         }
-    }
-
-    /// The optional sign and the digits at the current position. @throw ParserException if there are no digits
-    std::string_view number() {
-        std::string_view token = this->token();
-        std::size_t n = token.starts_with('-') || token.starts_with('+');
-        if (n == token.size() || !isDigit(token[n])) unexpected();
-        while (n < token.size() && isDigit(token[n])) ++n;
-        return token.substr(0, n);
     }
 
     std::unique_ptr<archive, decltype(&archive_read_free)> file_ { archive_read_new(), archive_read_free };

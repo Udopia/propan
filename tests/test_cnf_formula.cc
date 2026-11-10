@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "propan/cnf_formula.h"
+#include "propan/dimacs.h"
 #include "test_util.h"
 
 using namespace propan;
@@ -87,7 +88,7 @@ TEST_CASE("clauses are accessible by reference") {
 }
 
 TEST_CASE("parses DIMACS files") {
-    CNFFormula f(test::data("sat_small.cnf").c_str());
+    CNFFormula f = readCnf(test::data("sat_small.cnf").c_str());
     CHECK(f.nVars() == 4);
     REQUIRE(f.nClauses() == 4);
     CHECK(asCl(f[ClauseId(0)]) == lits({ 1, 2 }));
@@ -97,13 +98,13 @@ TEST_CASE("parses DIMACS files") {
 }
 
 TEST_CASE("parses compressed DIMACS files") {
-    CNFFormula f(test::data("sat_small.cnf.xz").c_str());
+    CNFFormula f = readCnf(test::data("sat_small.cnf.xz").c_str());
     CHECK(f.nClauses() == 4);
 }
 
 TEST_CASE("DIMACS: clauses spanning lines, several per line, comments in between") {
     TempFile file("c head\np cnf 4 3\n1\n2 0 -3\n4 0\nc tail\n-1 0\n");
-    CNFFormula f(file.c_str());
+    CNFFormula f = readCnf(file.c_str());
     REQUIRE(f.nClauses() == 3);
     CHECK(asCl(f[ClauseId(0)]) == lits({ 1, 2 }));
     CHECK(asCl(f[ClauseId(1)]) == lits({ -3, 4 }));
@@ -112,14 +113,14 @@ TEST_CASE("DIMACS: clauses spanning lines, several per line, comments in between
 
 TEST_CASE("DIMACS: last clause without terminating zero and newline is accepted") {
     TempFile file("p cnf 2 2\n1 0\n-1 2");
-    CNFFormula f(file.c_str());
+    CNFFormula f = readCnf(file.c_str());
     REQUIRE(f.nClauses() == 2);
     CHECK(asCl(f[ClauseId(1)]) == lits({ -1, 2 }));
 }
 
 TEST_CASE("DIMACS: variables declared in header but unused count in nVars") {
     TempFile file("p cnf 10 1\n1 2 0\n");
-    CNFFormula f(file.c_str());
+    CNFFormula f = readCnf(file.c_str());
     CHECK(f.nVars() == 10);
 }
 
@@ -165,7 +166,7 @@ TEST_CASE("moves transfer the clauses and leave the source empty") {
 
 TEST_CASE("empty file yields an empty formula") {
     TempFile file("");
-    CNFFormula f(file.c_str());
+    CNFFormula f = readCnf(file.c_str());
     CHECK(f.nClauses() == 0);
     CHECK(f.nVars() == 0);
 }

@@ -1,0 +1,11 @@
+# Every public header must compile on its own.
+file(GLOB PROPAN_HEADERS RELATIVE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/include/propan/*.h)
+set(HEADER_SOURCES)
+foreach(header ${PROPAN_HEADERS})
+    string(MAKE_C_IDENTIFIER ${header} id)
+    set(src ${CMAKE_CURRENT_BINARY_DIR}/headers/${id}.cc)
+    file(WRITE ${src} "#include \"${header}\"\n")
+    list(APPEND HEADER_SOURCES ${src})
+endforeach()
+add_library(propan_headers OBJECT ${HEADER_SOURCES})
+target_link_libraries(propan_headers PRIVATE propan::propan propan_warnings)

@@ -6,21 +6,18 @@
 // literals on WCNF formulas. Serves as integration test and benchmark of the
 // propagators: all counters depend only on propagation fixpoints and must be
 // identical for every propagator.
+//
+// Soft clause handling is application logic: only unit soft clauses are
+// considered here, as soft literals.
 
 #include <chrono>
 #include <cstdint>
-#include <cstring>
 #include <iostream>
-#include <memory>
-#include <string>
+#include <utility>
 #include <vector>
 
-#include "propan/binary_first_propagator.h"
-#include "propan/cnf_formula.h"
-#include "propan/occurrence_propagator.h"
-#include "propan/propagator.h"
-#include "propan/trail.h"
-#include "propan/watch_propagator.h"
+#include "common/cli.h"
+#include "propan/solver.h"
 #include "propan/wcnf_formula.h"
 
 using namespace propan;
@@ -34,49 +31,43 @@ struct Stats {
     std::uint64_t lifted = 0;    ///< literals implied by both polarities of a variable
 };
 
-std::unique_ptr<Propagator> makePropagator(const std::string& name, ClauseArena& clauses, Trail& trail) {
-    if (name == "occ") return std::make_unique<OccurrencePropagator>(clauses, trail);
-    if (name == "bin") return std::make_unique<BinaryFirstPropagator>(clauses, trail);
-    return std::make_unique<WatchPropagator>(clauses, trail);
-}
-
 /// Probes `lit` on a new level. @return false on conflict; the level is left open otherwise
-bool probe(Trail& trail, Propagator& prop, Lit lit, Stats& stats) {
+bool probe(Solver& s, Lit lit, Stats& stats) {
     ++stats.probes;
-    trail.newLevel();
-    trail.push(lit);
-    if (prop.propagate() != ClauseRef()) {
+    s.decide(lit);
+    if (s.propagate() != ClauseRef()) {
         ++stats.failed;
-        trail.backtrack();
+        s.trail().backtrack();
         return false;
     }
-    stats.implied += trail.literals(trail.level()).size() - 1;
+    stats.implied += s.trail().literals(s.trail().level()).size() - 1;
     return true;
 }
 
 /// Assigns a root fact and propagates. @return false if the formula is refuted
-bool fixRoot(Trail& trail, Propagator& prop, Lit lit) {
-    return trail.push(lit) && prop.propagate() == ClauseRef();
+bool fixRoot(Solver& s, Lit lit) {
+    return s.trail().push(lit) && s.propagate() == ClauseRef();
 }
 
 /// Failed literal probing with lifting of common implications, over all unassigned variables.
 /// @return false if the formula is refuted
-bool probeVariables(Trail& trail, Propagator& prop, Stats& stats, unsigned rounds) {
+bool probeVariables(Solver& s, Stats& stats, unsigned rounds) {
+    Trail& trail = s.trail();
     std::vector<unsigned char> mark(2 * trail.nVars() + 2, 0);
     std::vector<Lit> first, common;
     for (unsigned round = 0; round < rounds; ++round) {
         for (unsigned v = 1; v <= trail.nVars(); ++v) {
             const Lit pos(static_cast<int>(v));
             if (trail.value(pos) != VAL_UNASSIGNED) continue;
-            if (!probe(trail, prop, pos, stats)) {
-                if (!fixRoot(trail, prop, -pos)) return false;
+            if (!probe(s, pos, stats)) {
+                if (!fixRoot(s, -pos)) return false;
                 continue;
             }
             const auto implied = trail.literals(trail.level()).subspan(1);
             first.assign(implied.begin(), implied.end());
             trail.backtrack();
             for (Lit l : first) mark[l.index()] = 1;
-            const bool other_ok = probe(trail, prop, -pos, stats);
+            const bool other_ok = probe(s, -pos, stats);
             common.clear();
             if (other_ok) {
                 for (Lit l : trail.literals(trail.level()).subspan(1)) {
@@ -86,53 +77,55 @@ bool probeVariables(Trail& trail, Propagator& prop, Stats& stats, unsigned round
             }
             for (Lit l : first) mark[l.index()] = 0;
             if (!other_ok) {
-                if (!fixRoot(trail, prop, pos)) return false;
+                if (!fixRoot(s, pos)) return false;
                 continue;
             }
             stats.lifted += common.size();
             for (Lit l : common) {
-                if (!fixRoot(trail, prop, l)) return false;
+                if (!fixRoot(s, l)) return false;
             }
         }
     }
     return true;
 }
 
-int runCnf(CNFFormula& f, const std::string& prop_name, unsigned rounds) {
+int runCnf(CNFFormula f, const Options& options, unsigned rounds) {
     const auto t0 = std::chrono::steady_clock::now();
-    Trail trail(f.nVars());
-    auto prop = makePropagator(prop_name, f.clauses(), trail);
+    Solver s(std::move(f), options);
     Stats stats;
-    bool ok = prop->attachAll(f.clauses()) && prop->propagate() == ClauseRef();
-    const std::size_t root_units = trail.size();
-    if (ok) ok = probeVariables(trail, *prop, stats, rounds);
+    bool ok = s.consistent();
+    const std::size_t root_units = s.trail().size();
+    if (ok) ok = probeVariables(s, stats, rounds);
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    std::cout << "c variables " << f.nVars() << " clauses " << f.nClauses() << "\n"
+    std::cout << "c variables " << s.nVars() << " clauses " << s.formula().nClauses() << "\n"
               << "c root-units " << root_units << "\n"
               << "c probes " << stats.probes << " failed " << stats.failed << " lifted " << stats.lifted
               << " implied " << stats.implied << "\n"
-              << "c root-assigned " << (ok ? trail.literals(0).size() : 0) << "\n"
-              << "c propagator " << prop_name << " time " << secs << "\n"
+              << "c root-assigned " << (ok ? s.trail().literals(0).size() : 0) << "\n"
+              << "c propagator " << options.propagator << " time " << secs << "\n"
               << (ok ? "s UNKNOWN" : "s UNSATISFIABLE") << std::endl;
     return 0;
 }
 
-int runWcnf(WCNFFormula& f, const std::string& prop_name) {
+int runWcnf(WCNFFormula f, const Options& options) {
     const auto t0 = std::chrono::steady_clock::now();
-    Trail trail(f.nVars());
-    auto prop = makePropagator(prop_name, f.hard().clauses(), trail);
-    Stats stats;
-    bool ok = prop->attachAll(f.hard().clauses()) && prop->propagate() == ClauseRef();
-    if (ok) ok = probeVariables(trail, *prop, stats, 1);  // preprocess the hard part
-    // Soft literals: unit soft clauses.
+    // Soft literals: unit soft clauses, taken before the hard part is moved into the solver.
     std::vector<Lit> softs;
     std::vector<std::uint64_t> weights;
-    for (auto clause : f.soft()) {
-        if (clause.size() == 1) {
-            softs.push_back(clause[0]);
-            weights.push_back(f.weights()[clause.id().index()]);
+    for (const SoftClause& clause : f.soft()) {
+        if (clause.lits.size() == 1) {
+            softs.push_back(clause.lits[0]);
+            weights.push_back(clause.weight);
         }
     }
+    const unsigned n_vars = f.nVars();
+    const std::size_t n_hard = f.nHardClauses(), n_soft = f.nSoftClauses();
+    f.hard().ensureVars(n_vars);  // soft-only variables must exist in the solver
+    Solver s(std::move(f.hard()), options);
+    Trail& trail = s.trail();
+    Stats stats;
+    bool ok = s.consistent();
+    if (ok) ok = probeVariables(s, stats, 1);  // preprocess the hard part
     // Probe every soft literal; a failed one is falsified at the root and counts towards the lower bound.
     std::uint64_t lower_bound = 0;
     std::uint64_t already_true = 0;
@@ -143,20 +136,19 @@ int runWcnf(WCNFFormula& f, const std::string& prop_name) {
             ++already_true;
         } else if (trail.value(l) == VAL_FALSE) {
             lower_bound += weights[i];
-        } else if (probe(trail, *prop, l, stats)) {
+        } else if (probe(s, l, stats)) {
             trail.backtrack();
             open.push_back(l);
         } else {
             lower_bound += weights[i];
-            ok = fixRoot(trail, *prop, -l);
+            ok = fixRoot(s, -l);
         }
     }
     // Push all open soft literals as one block and see whether propagation accepts them.
     bool block_consistent = false;
     std::uint64_t block_implied = 0;
     if (ok) {
-        trail.newLevel();
-        block_consistent = trail.push(open) && prop->propagate() == ClauseRef();
+        block_consistent = s.decide(open) && s.propagate() == ClauseRef();
         if (block_consistent) block_implied = trail.literals(trail.level()).size() - open.size();
         trail.backtrack();
     }
@@ -167,7 +159,7 @@ int runWcnf(WCNFFormula& f, const std::string& prop_name) {
         for (std::size_t i = 0; i < softs.size(); ++i) {
             const Lit l = softs[i];
             if (trail.value(l) == VAL_TRUE) continue;
-            if (trail.value(l) == VAL_FALSE || !probe(trail, *prop, l, stats)) {
+            if (trail.value(l) == VAL_FALSE || !probe(s, l, stats)) {
                 ++greedy_skipped;
                 greedy_weight += weights[i];
             }
@@ -175,14 +167,14 @@ int runWcnf(WCNFFormula& f, const std::string& prop_name) {
         trail.backtrackTo(0);
     }
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    std::cout << "c variables " << f.nVars() << " hard " << f.nHardClauses() << " soft " << f.nSoftClauses()
+    std::cout << "c variables " << n_vars << " hard " << n_hard << " soft " << n_soft
               << " soft-units " << softs.size() << "\n"
               << "c probes " << stats.probes << " failed " << stats.failed << " lifted " << stats.lifted
               << " implied " << stats.implied << "\n"
               << "c soft-true " << already_true << " lower-bound " << lower_bound << "\n"
               << "c block " << (block_consistent ? "consistent" : "conflicting") << " implied " << block_implied << "\n"
               << "c greedy-skipped " << greedy_skipped << " weight " << greedy_weight << "\n"
-              << "c propagator " << prop_name << " time " << secs << "\n"
+              << "c propagator " << options.propagator << " time " << secs << "\n"
               << (ok ? "s UNKNOWN" : "s UNSATISFIABLE") << std::endl;
     return 0;
 }
@@ -190,17 +182,10 @@ int runWcnf(WCNFFormula& f, const std::string& prop_name) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 2) {
-        std::cout << "USAGE: probe <formula.cnf|formula.wcnf> [watch|occ|bin] [rounds]" << std::endl;
-        return 0;
-    }
-    const std::string file = argv[1];
-    const std::string prop_name = argc > 2 ? argv[2] : "watch";
-    const unsigned rounds = argc > 3 ? static_cast<unsigned>(std::stoul(argv[3])) : 1;
-    if (file.find(".wcnf") != std::string::npos) {
-        WCNFFormula f(file.c_str());
-        return runWcnf(f, prop_name);
-    }
-    CNFFormula f(file.c_str());
-    return runCnf(f, prop_name, rounds);
+    cli::App app("Failed literal probing as integration test and benchmark of the propagators");
+    unsigned rounds = 1;
+    app.add_option("-r,--rounds", rounds, "probing rounds over all variables (CNF)")->default_val(1);
+    if (auto code = cli::parse(app, argc, argv)) return *code;
+    if (cli::isWcnf(app.file)) return runWcnf(readWcnf(app.file.c_str()), app.options());
+    return runCnf(readCnf(app.file.c_str()), app.options(), rounds);
 }

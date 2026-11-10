@@ -1,73 +1,31 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
-#include <initializer_list>
-#include <utility>
+#include <random>
 #include <vector>
 
-#include <random>
-
 #include "propan/cnf_formula.h"
+#include "propan/dimacs.h"
 #include "propan/occurrence_propagator.h"
 #include "propan/trail.h"
-#include "propan/binary_first_propagator.h"
 #include "propan/watch_propagator.h"
 #include "test_util.h"
 
 using namespace propan;
 using test::lits;
 
-namespace {
-
-/// Clause content as a sorted vector, since propagators may reorder literals.
-Cl sorted(std::span<const Lit> clause) {
-    Cl c(clause.begin(), clause.end());
-    std::sort(c.begin(), c.end());
-    return c;
-}
-
-CNFFormula cnf(std::initializer_list<std::initializer_list<int>> clauses) {
-    CNFFormula f;
-    for (auto& c : clauses) {
-        Cl cl;
-        for (int d : c) cl.push_back(Lit(d));
-        f.addClause(cl);
-    }
-    return f;
-}
-
-/// Formula, trail and propagator bound together.
-template<class P>
-struct Solver {
-    CNFFormula f;
-    Trail t;
-    P p;
-
-    explicit Solver(CNFFormula formula) : f(std::move(formula)), t(f.nVars()), p(f.clauses(), t) { }
-
-    /// Attaches all clauses and propagates the root level. @return false if refuted
-    bool init() { return p.attachAll(f.clauses()) && ok(); }
-
-    /// Propagates. @return true if there is no conflict
-    bool ok() { return p.propagate() == ClauseRef(); }
-
-    bool isTrue(int d) const { return t.value(Lit(d)) == VAL_TRUE; }
-};
-
-}  // namespace
-
+using test::cnf;
+using test::sorted;
 TEST_SUITE("propagators") {
 
-#define PROPAGATORS OccurrencePropagator, WatchPropagator, BinaryFirstPropagator
-
 TEST_CASE_TEMPLATE("init without units leaves everything unassigned", P, PROPAGATORS) {
-    Solver<P> s(cnf({ { 1, 2 }, { -1, 3 } }));
+    test::Fixture<P> s(cnf({ { 1, 2 }, { -1, 3 } }));
     CHECK(s.init());
     CHECK(s.t.size() == 0);
 }
 
 TEST_CASE_TEMPLATE("init propagates unit clauses to fixpoint with the units as reasons", P, PROPAGATORS) {
-    Solver<P> s(cnf({ { 1 }, { -1, 2 }, { -2, 3 }, { -3, -4 } }));
+    test::Fixture<P> s(cnf({ { 1 }, { -1, 2 }, { -2, 3 }, { -3, -4 } }));
     REQUIRE(s.init());
     CHECK(s.t.size() == 4);
     for (int d : { 1, 2, 3, -4 }) CHECK(s.isTrue(d));
@@ -80,22 +38,22 @@ TEST_CASE_TEMPLATE("init propagates unit clauses to fixpoint with the units as r
 }
 
 TEST_CASE_TEMPLATE("init detects contradicting units", P, PROPAGATORS) {
-    Solver<P> s(cnf({ { 1 }, { -1 } }));
+    test::Fixture<P> s(cnf({ { 1 }, { -1 } }));
     CHECK_FALSE(s.init());
 }
 
 TEST_CASE_TEMPLATE("init detects conflict by propagation of units", P, PROPAGATORS) {
-    Solver<P> s(cnf({ { 1 }, { -1, 2 }, { -1, -2 } }));
+    test::Fixture<P> s(cnf({ { 1 }, { -1, 2 }, { -1, -2 } }));
     CHECK_FALSE(s.init());
 }
 
 TEST_CASE_TEMPLATE("init detects the empty clause", P, PROPAGATORS) {
-    Solver<P> s(cnf({ { 1, 2 }, {} }));
+    test::Fixture<P> s(cnf({ { 1, 2 }, {} }));
     CHECK_FALSE(s.init());
 }
 
 TEST_CASE_TEMPLATE("propagate follows implication chains and returns UNDEF", P, PROPAGATORS) {
-    Solver<P> s(cnf({ { -1, 2 }, { -2, 3 }, { -3, 4 }, { -4, 5 } }));
+    test::Fixture<P> s(cnf({ { -1, 2 }, { -2, 3 }, { -3, 4 }, { -4, 5 } }));
     REQUIRE(s.init());
     s.t.newLevel();
     s.t.push(Lit(1));
@@ -112,7 +70,7 @@ TEST_CASE_TEMPLATE("propagate follows implication chains and returns UNDEF", P, 
 }
 
 TEST_CASE_TEMPLATE("propagate does not fire satisfied or non-unit clauses", P, PROPAGATORS) {
-    Solver<P> s(cnf({ { -1, 2, 3 }, { -1, 4, -5 } }));
+    test::Fixture<P> s(cnf({ { -1, 2, 3 }, { -1, 4, -5 } }));
     REQUIRE(s.init());
     s.t.push(Lit(1));
     CHECK(s.ok());
@@ -126,7 +84,7 @@ TEST_CASE_TEMPLATE("propagate does not fire satisfied or non-unit clauses", P, P
 }
 
 TEST_CASE_TEMPLATE("propagate ignores clauses satisfied before becoming unit", P, PROPAGATORS) {
-    Solver<P> s(cnf({ { -1, -2, 3 } }));
+    test::Fixture<P> s(cnf({ { -1, -2, 3 } }));
     REQUIRE(s.init());
     s.t.push(lits({ 3, 1, 2 }));
     CHECK(s.ok());
@@ -135,7 +93,7 @@ TEST_CASE_TEMPLATE("propagate ignores clauses satisfied before becoming unit", P
 
 TEST_CASE_TEMPLATE("propagate returns the conflicting clause", P, PROPAGATORS) {
     SUBCASE("two binary clauses") {
-        Solver<P> s(cnf({ { -1, 2 }, { -1, -2 } }));
+        test::Fixture<P> s(cnf({ { -1, 2 }, { -1, -2 } }));
         REQUIRE(s.init());
         s.t.push(Lit(1));
         ClauseRef conflict = s.p.propagate();
@@ -144,13 +102,13 @@ TEST_CASE_TEMPLATE("propagate returns the conflicting clause", P, PROPAGATORS) {
         for (Lit l : s.f[conflict]) CHECK(s.t.value(l) == VAL_FALSE);
     }
     SUBCASE("all literals of a clause falsified by decisions") {
-        Solver<P> s(cnf({ { 1, 2, 3 } }));
+        test::Fixture<P> s(cnf({ { 1, 2, 3 } }));
         REQUIRE(s.init());
         s.t.push(lits({ -1, -2, -3 }));
         CHECK(s.p.propagate() == s.f.clauses().ref(ClauseId(0)));
     }
     SUBCASE("longer chain") {
-        Solver<P> s(cnf({ { -1, 2 }, { -2, 3 }, { -3, -1 } }));
+        test::Fixture<P> s(cnf({ { -1, 2 }, { -2, 3 }, { -3, -1 } }));
         REQUIRE(s.init());
         s.t.push(Lit(1));
         CHECK_FALSE(s.ok());
@@ -158,7 +116,7 @@ TEST_CASE_TEMPLATE("propagate returns the conflicting clause", P, PROPAGATORS) {
 }
 
 TEST_CASE_TEMPLATE("backtrack after conflict allows propagating the other branch", P, PROPAGATORS) {
-    Solver<P> s(cnf({ { -1, 2 }, { -1, -2 }, { 1, 3 } }));
+    test::Fixture<P> s(cnf({ { -1, 2 }, { -1, -2 }, { 1, 3 } }));
     REQUIRE(s.init());
     s.t.newLevel();
     s.t.push(Lit(1));
@@ -172,7 +130,7 @@ TEST_CASE_TEMPLATE("backtrack after conflict allows propagating the other branch
 }
 
 TEST_CASE_TEMPLATE("propagation after backtrack re-propagates nothing stale", P, PROPAGATORS) {
-    Solver<P> s(cnf({ { -1, 2 }, { -3, 4 } }));
+    test::Fixture<P> s(cnf({ { -1, 2 }, { -3, 4 } }));
     REQUIRE(s.init());
     s.t.newLevel();
     s.t.push(Lit(1));
@@ -189,7 +147,7 @@ TEST_CASE_TEMPLATE("propagation after backtrack re-propagates nothing stale", P,
 }
 
 TEST_CASE_TEMPLATE("several decisions on one level are propagated and undone together", P, PROPAGATORS) {
-    Solver<P> s(cnf({ { -1, 2 }, { -3, 4 }, { -2, -4, 5 } }));
+    test::Fixture<P> s(cnf({ { -1, 2 }, { -3, 4 }, { -2, -4, 5 } }));
     REQUIRE(s.init());
     s.t.newLevel();
     s.t.push(lits({ 1, 3 }));
@@ -202,7 +160,7 @@ TEST_CASE_TEMPLATE("several decisions on one level are propagated and undone tog
 }
 
 TEST_CASE_TEMPLATE("attach assigns a clause that is unit under the current assignment", P, PROPAGATORS) {
-    Solver<P> s(cnf({ { 1, 2 }, { 3, 4 } }));
+    test::Fixture<P> s(cnf({ { 1, 2 }, { 3, 4 } }));
     REQUIRE(s.init());
     s.t.newLevel();
     s.t.push(Lit(-1));
@@ -217,7 +175,7 @@ TEST_CASE_TEMPLATE("attach assigns a clause that is unit under the current assig
 }
 
 TEST_CASE_TEMPLATE("attach reports a clause that is already falsified", P, PROPAGATORS) {
-    Solver<P> s(cnf({ { 1, 2 }, { 3, 4 } }));
+    test::Fixture<P> s(cnf({ { 1, 2 }, { 3, 4 } }));
     REQUIRE(s.init());
     s.t.push(lits({ -1, -3 }));
     s.f.addClause(lits({ 1, 3 }));
@@ -225,7 +183,7 @@ TEST_CASE_TEMPLATE("attach reports a clause that is already falsified", P, PROPA
 }
 
 TEST_CASE_TEMPLATE("detached clauses no longer propagate", P, PROPAGATORS) {
-    Solver<P> s(cnf({ { -1, 2 }, { -1, 3 } }));
+    test::Fixture<P> s(cnf({ { -1, 2 }, { -1, 3 } }));
     REQUIRE(s.init());
     s.p.detach(s.f.clauses().ref(ClauseId(0)));
     s.t.newLevel();
@@ -243,7 +201,7 @@ TEST_CASE_TEMPLATE("relocate keeps propagating after compaction", P, PROPAGATORS
     a.erase(a.ref(ClauseId(0)));  // leave a hole for compaction
     Trail t(3);
     P p(a, t);
-    REQUIRE(p.attachAll(a));
+    REQUIRE(test::attachAll(p, a));
     REQUIRE(p.propagate() == ClauseRef());
     t.newLevel();
     t.push(Lit(1));
@@ -263,7 +221,7 @@ TEST_CASE_TEMPLATE("relocate keeps propagating after compaction", P, PROPAGATORS
 }
 
 TEST_CASE_TEMPLATE("solves the test formula by decisions and propagation", P, PROPAGATORS) {
-    Solver<P> s(CNFFormula(test::data("sat_small.cnf").c_str()));
+    test::Fixture<P> s(readCnf(test::data("sat_small.cnf").c_str()));
     REQUIRE(s.init());
     s.t.newLevel();
     s.t.push(Lit(1));
@@ -272,7 +230,7 @@ TEST_CASE_TEMPLATE("solves the test formula by decisions and propagation", P, PR
     CHECK(satisfies(s.t, s.f.clauses()));
 }
 
-TEST_CASE("all propagators agree on random formulas") {
+TEST_CASE("occurrence and watch propagation agree on random formulas") {
     std::mt19937 rng(12345);
     for (int round = 0; round < 200; ++round) {
         const unsigned n = 4 + rng() % 12;
@@ -284,18 +242,15 @@ TEST_CASE("all propagators agree on random formulas") {
             for (unsigned k = 0; k < len; ++k) c.push_back(Lit(int(1 + rng() % n) * (rng() % 2 ? 1 : -1)));
             f.addClause(c);
         }
-        CNFFormula g = f, h = f;  // watch propagators reorder literals; keep pristine copies
+        CNFFormula g = f;  // the watch propagator reorders literals; keep a pristine copy
         const unsigned nv = f.nVars();
         if (nv == 0) continue;
-        Trail to(nv), tw(nv), tb(nv);
+        Trail to(nv), tw(nv);
         OccurrencePropagator po(f.clauses(), to);
         WatchPropagator pw(g.clauses(), tw);
-        BinaryFirstPropagator pb(h.clauses(), tb);
-        const bool ok_o = po.attachAll(f.clauses()) && po.propagate() == ClauseRef();
-        const bool ok_w = pw.attachAll(g.clauses()) && pw.propagate() == ClauseRef();
-        const bool ok_b = pb.attachAll(h.clauses()) && pb.propagate() == ClauseRef();
+        const bool ok_o = test::attachAll(po, f.clauses()) && po.propagate() == ClauseRef();
+        const bool ok_w = test::attachAll(pw, g.clauses()) && pw.propagate() == ClauseRef();
         REQUIRE(ok_o == ok_w);
-        REQUIRE(ok_o == ok_b);
         if (!ok_o) continue;
         for (int step = 0; step < 30; ++step) {
             const unsigned v = 1 + rng() % nv;
@@ -303,34 +258,25 @@ TEST_CASE("all propagators agree on random formulas") {
                 if (to.level() > 0 && rng() % 3 == 0) {
                     to.backtrack();
                     tw.backtrack();
-                    tb.backtrack();
                 }
                 continue;
             }
             const Lit d(int(v) * (rng() % 2 ? 1 : -1));
-            for (Trail* t : { &to, &tw, &tb }) {
+            for (Trail* t : { &to, &tw }) {
                 t->newLevel();
                 t->push(d);
             }
             const ClauseRef co = po.propagate();
             const ClauseRef cw = pw.propagate();
-            const ClauseRef cb = pb.propagate();
             REQUIRE((co == ClauseRef()) == (cw == ClauseRef()));
-            REQUIRE((co == ClauseRef()) == (cb == ClauseRef()));
             if (co != ClauseRef()) {
-                for (Lit l : g[cw]) CHECK(tw.value(l) == VAL_FALSE);
-                for (Lit l : h[cb]) CHECK(tb.value(l) == VAL_FALSE);
+                for (Lit l : g.clauses()[cw]) CHECK(tw.value(l) == VAL_FALSE);
                 to.backtrack();
                 tw.backtrack();
-                tb.backtrack();
                 continue;
             }
             REQUIRE(to.size() == tw.size());
-            REQUIRE(to.size() == tb.size());
-            for (unsigned u = 1; u <= nv; ++u) {
-                CHECK(to.value(Var(u)) == tw.value(Var(u)));
-                CHECK(to.value(Var(u)) == tb.value(Var(u)));
-            }
+            for (unsigned u = 1; u <= nv; ++u) CHECK(to.value(Var(u)) == tw.value(Var(u)));
             CHECK(satisfies(to, f.clauses()) == satisfies(tw, g.clauses()));
         }
     }
@@ -351,7 +297,7 @@ TEST_CASE("watch propagator maintains the watch invariants") {
         if (nv == 0) continue;
         Trail t(nv);
         WatchPropagator p(f.clauses(), t);
-        REQUIRE(p.attachAll(f.clauses()));
+        REQUIRE(test::attachAll(p, f.clauses()));
         auto check = [&] {
             // Every clause is satisfied, or both watched literals (the first two) are non-false.
             for (auto c : f) {
@@ -385,7 +331,7 @@ TEST_CASE("watch propagator visits long clauses only through their watches") {
     CNFFormula f = cnf({ { 1, 2, 3, 4, 5 } });
     Trail t(f.nVars());
     WatchPropagator p(f.clauses(), t);
-    REQUIRE(p.attachAll(f.clauses()));
+    REQUIRE(test::attachAll(p, f.clauses()));
     t.newLevel();
     t.push(lits({ -3, -4, -5 }));  // not watched: nothing happens
     REQUIRE(p.propagate() == ClauseRef());

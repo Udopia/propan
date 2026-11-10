@@ -52,13 +52,18 @@ class Trail {
  public:
     explicit Trail(unsigned n_vars = 0) { resize(n_vars); }
 
-    /// Forgets all assignments and levels; covers variables `1..n_vars`.
+    /// Covers variables `1..n_vars`; new variables are unassigned, existing assignments are kept.
     void resize(unsigned n_vars) {
+        assert(n_vars >= nVars());
+        val_.resize(n_vars);
+        vars_.resize(n_vars + 1);
+    }
+
+    /// Forgets all assignments and levels, keeping the variables.
+    void clear() {
         trail_.clear();
         lim_.assign(1, 0);
-        val_.clear();
-        val_.resize(n_vars);
-        vars_.assign(n_vars + 1, VarInfo());
+        val_.assign(VAL_UNASSIGNED);
         head = 0;
     }
 
@@ -185,10 +190,10 @@ class Trail {
     }
 
     /// Replaces the reasons of assigned variables after ClauseArena::compact().
-    void relocate(std::span<const ClauseArena::Relocation> relocation) {
+    void relocate(const ClauseArena::Relocation& relocation) {
         for (Lit lit : trail_) {
             ClauseRef& reason = vars_[lit.var()].reason;
-            if (reason != ClauseRef()) reason = relocated(relocation, reason);
+            if (reason != ClauseRef()) reason = relocation(reason);
         }
     }
 

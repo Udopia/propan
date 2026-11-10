@@ -7,12 +7,14 @@ Boolean Constraint Propagation Library
 ## Clause storage
 
 [`ClauseArena`](include/propan/clause_arena.h) stores live clauses as
-`[payload/flags][ClauseId][pos][literals...]`. Payload counts all words after
-the first header word: ID, search position and literals for live clauses,
-unused words for deleted records. Every record advances by `1 + payload`; live
-literal count is `payload - ClauseHeader::META`. The position word is scratch
-for propagators (circular watch replacement search), initialized to 2.
-`ClauseRef` is a direct word offset;
+`[payload/flags][ClauseId][glue:8|pos:24][literals...]`. Payload counts all
+words after the first header word: ID, position word and literals for live
+clauses, unused words for deleted records. Every record advances by
+`1 + payload`; live literal count is `payload - ClauseHeader::META`. The
+position word holds the search position for circular watch replacement
+(propagator scratch, initialized to 2) and an 8-bit glue/score byte.
+`ClauseRef` is a direct word offset below `ClauseRef::MAX_OFFSET` (2^31), so
+that the topmost bit of a reference is free for tagging;
 `arena.id(ref)` and `arena.ref(id)` map between offsets and stable metadata IDs.
 `arena.refs()` is indexed by ID, with `UNDEF` entries for deleted clauses.
 IDs are not reused until `clear()`.
@@ -20,7 +22,6 @@ IDs are not reused until `clear()`.
 Iteration scans live records and yields views exposing `header()`, `id()`,
 `ref()` and `literals()`. Mutable views allow literal and user-flag changes.
 Ordinal indexing is removed; formulas accept `ClauseId` or `ClauseRef`.
-Soft-clause weights are indexed by `clause.id().index()`.
 
 `shrink(ref, size)` retains a literal prefix and turns the tail into padding;
 `erase(ref)` only sets the deletion bit, preserving payload length.
@@ -60,20 +61,43 @@ is the read-only reference implementation with full occurrence lists.
 [`WatchPropagator`](include/propan/watch_propagator.h) implements two watched
 literals with blocking literals, tagged binary watches (never visiting the
 clause) and a circular replacement search resuming at the clause's position
-word. [`BinaryFirstPropagator`](include/propan/binary_first_propagator.h)
-derives from it and keeps binary clauses in a flat CSR array that is visited
-before the watch lists. The applications select the propagator by name:
-`watch` (default), `occ` or `bin`.
+word. Applications select the propagator with `-p watch` (default) or `-p occ`.
 
-## Applications and integration tests
+[`propagators.h`](include/propan/propagators.h) collects the implementations
+and creates the one selected by `Options` (`makePropagator(options, arena,
+trail)`, names in `PROPAGATOR_NAMES`). [`Solver`](include/propan/solver.h)
+owns a formula, a trail and a propagator and keeps them consistent:
+construction attaches and propagates the root level, `add()`/`learn()`
+attach, `erase()` detaches, `compact()` relocates, `newVar()` grows all
+three, `decide()`/`propagate()` drive the search. It is solver *state*, not a
+search procedure; those live in the applications. With `-DPROPAN_STATS=ON`
+propagators maintain counters (`Propagator::stats()`).
 
-- `slursat <cnf|wcnf> [seed] [k] [propagator]`: SLUR, SLUR(k) (blocks of `k`
-  decisions per level, `k > 1`) and SLUR(k) with immediate propagation (`k < 0`).
-- `probe <cnf|wcnf> [propagator] [rounds]`: failed literal probing with lifting of
-  common implications; on WCNF additionally probes the soft unit literals, the
-  block of all of them, and a greedy selection. All reported counters depend
-  only on propagation fixpoints and are therefore identical for every
-  propagator, which makes them integration tests of the propagators.
+Formulas ([`CNFFormula`](include/propan/cnf_formula.h),
+[`WCNFFormula`](include/propan/wcnf_formula.h)) are containers; DIMACS input
+is in [`dimacs.h`](include/propan/dimacs.h) (`readCnf`, `readWcnf`), the only
+part of the library that depends on libarchive.
+
+## Applications
+
+The library is header-only; applications compile it in. They are organized in
+tiers under [`apps/`](apps) with shared helpers in [`apps/common`](apps/common):
+
+- [`apps/solvers`](apps/solvers) (`PROPAN_BUILD_SOLVERS`): decision procedures.
+  `slursat <cnf|wcnf> [-s seed] [-k k] [-p propagator]` runs SLUR, SLUR(k)
+  (blocks of `k` decisions per level, `k > 1`) or SLUR(k) with immediate
+  propagation (`k < 0`); on WCNF input it takes the hard clauses.
+- [`apps/tests`](apps/tests) (`PROPAN_BUILD_TESTS`): test and benchmark drivers.
+  `probe <cnf|wcnf> [-p propagator] [-r rounds]` performs failed literal probing with
+  lifting of common implications; on WCNF it additionally probes the soft unit
+  literals, the block of all of them, and a greedy selection. All reported
+  counters depend only on propagation fixpoints and are therefore identical for
+  every propagator, which makes them integration tests of the propagators.
+
+Soft clause semantics (relaxation, activation literals, bounds) are
+application concerns; the library only parses and stores WCNF.
+
+## Integration tests and benchmarks
 
 [`tests/data/instances`](tests/data/instances) holds small mostly-Horn CNF and
 WCNF instances from [benchmark-database.de](https://benchmark-database.de)
@@ -102,14 +126,18 @@ Requires CMake 3.20, a C++20 compiler and libarchive (`libarchive-dev`).
 ```sh
 cmake -S . -B build
 cmake --build build
-./build/apps/slursat <formula.cnf> [seed] [k] [watch|occ|bin]
-./build/apps/probe <formula.cnf|formula.wcnf> [watch|occ|bin]
+./build/apps/solvers/slursat <formula.cnf> [-s seed] [-k k] [-p watch|occ]
+./build/apps/tests/probe <formula.cnf|formula.wcnf> [-p watch|occ]
 ```
+
+Command lines are parsed with [CLI11](https://github.com/CLIUtils/CLI11),
+vendored in [`third_party/CLI11`](third_party/CLI11); `--help` lists the options.
 
 ## Testing
 
 Unit tests use [doctest](https://github.com/doctest/doctest) 2.4.12, vendored in
-[`third_party/doctest`](third_party/doctest) with its license. No download is needed.
+[`third_party/doctest`](third_party/doctest) with its license; applications use
+CLI11 2.4.2 from [`third_party/CLI11`](third_party/CLI11). No download is needed.
 CTest runs unit tests as one suite and applications end-to-end.
 
 ```sh
@@ -120,7 +148,8 @@ ctest --test-dir build --output-on-failure
 
 `-DPROPAN_WERROR=ON` treats warnings as errors, `-DPROPAN_SANITIZERS=ON` builds
 with AddressSanitizer and UndefinedBehaviorSanitizer. Integration tests carry
-the label `integration` (`ctest -L integration` / `-LE integration`).
+the label `integration` (`ctest -L integration` / `-LE integration`). The test
+build also compiles every public header on its own to keep them self-contained.
 
 ## Continuous integration
 

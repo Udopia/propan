@@ -50,16 +50,21 @@ class OccurrencePropagator : public Propagator {
         for (Lit lit : clauses_[ref]) std::erase(occ_[lit], ref);
     }
 
-    void relocate(std::span<const ClauseArena::Relocation> relocation) override {
+    void relocate(const ClauseArena::Relocation& relocation) override {
         for (auto& list : occ_) {
-            for (ClauseRef& ref : list) ref = relocated(relocation, ref);
+            for (ClauseRef& ref : list) ref = relocation(ref);
         }
     }
+
+    void resize(unsigned n_vars) override { occ_.resize(n_vars); }
 
     ClauseRef propagate() override {
         while (trail_.head < trail_.size()) {
             const Lit falsified = -trail_[trail_.head++];
+            PROPAN_STAT(stats_.propagations);
             for (ClauseRef ref : occ_[falsified]) {
+                PROPAN_STAT(stats_.visits);
+                PROPAN_STAT(stats_.clauses);
                 Lit unit = UNDEF_LIT;
                 for (Lit lit : clauses_[ref]) {
                     const Val v = trail_.value(lit);
@@ -69,7 +74,11 @@ class OccurrencePropagator : public Propagator {
                         unit = lit;
                     }
                 }
-                if (unit == UNDEF_LIT) return ref;  // all literals false
+                if (unit == UNDEF_LIT) {
+                    PROPAN_STAT(stats_.conflicts);
+                    return ref;  // all literals false
+                }
+                PROPAN_STAT(stats_.assigned);
                 trail_.assign(unit, ref);
             next_clause:;
             }

@@ -40,6 +40,9 @@ void checkInvariants(const Trail& t) {
     CHECK(expected == t.end());
 }
 
+/// Marks the queue as fully propagated, as a propagator would leave it.
+void propagated(Trail& t) { t.head = t.size(); }
+
 }  // namespace
 
 TEST_SUITE("trail") {
@@ -55,16 +58,30 @@ TEST_CASE("a fresh trail is empty on the root level") {
     checkInvariants(t);
 }
 
-TEST_CASE("resize forgets assignments and levels") {
+TEST_CASE("resize grows preserving assignments; clear forgets them") {
     Trail t(2);
     t.newLevel();
     t.push(Lit(1));
+    t.assign(Lit(-2), ClauseRef(3));
     t.resize(4);
+    CHECK(t.nVars() == 4);
+    CHECK(t.size() == 2);
+    CHECK(t.level() == 1);
+    CHECK(t.value(Lit(1)) == VAL_TRUE);
+    CHECK(t.value(Lit(2)) == VAL_FALSE);
+    CHECK(t.reason(Var(2)) == ClauseRef(3));
+    CHECK(t.value(Var(3)) == VAL_UNASSIGNED);
+    CHECK(t.value(Var(4)) == VAL_UNASSIGNED);
+    propagated(t);
+    t.newLevel();
+    CHECK(t.push(Lit(4)));
+    checkInvariants(t);
+    t.clear();
     CHECK(t.nVars() == 4);
     CHECK(t.size() == 0);
     CHECK(t.level() == 0);
-    CHECK(t.value(Var(1)) == VAL_UNASSIGNED);
-    CHECK(t.value(Var(4)) == VAL_UNASSIGNED);
+    CHECK(t.head == 0);
+    for (unsigned v = 1; v <= 4; ++v) CHECK(t.value(Var(v)) == VAL_UNASSIGNED);
 }
 
 TEST_CASE("push assigns, accepts repeated and rejects contradicting literals") {
@@ -125,7 +142,7 @@ TEST_CASE("assign records reason and level; the queue holds unpropagated literal
     CHECK_FALSE(t.isDecision(Lit(3)));
     CHECK(t.isDecision(Lit(2)));
     CHECK(t.level(Var(1)) == 0);
-    t.head = t.size();  // "propagated"
+    propagated(t);  // "propagated"
     t.newLevel();
     t.push(Lit(4));
     CHECK(t.level() == 2);
@@ -171,7 +188,7 @@ TEST_CASE("backtrackTo undoes several levels at once and ignores higher targets"
     for (int d = 1; d <= 5; ++d) {
         t.newLevel();
         t.push(Lit(d));
-        t.head = t.size();
+        propagated(t);
     }
     CHECK(t.level() == 5);
     t.backtrackTo(7);
@@ -216,7 +233,7 @@ TEST_CASE("backtrackToRetaining keeps out-of-order assignments and queues them a
     CHECK(t.head == 1);  // retained literals must be propagated again
     checkInvariants(t);
 
-    t.head = t.size();
+    propagated(t);
     t.backtrackToRetaining(0);
     CHECK(t.level() == 0);
     CHECK(t.size() == 1);

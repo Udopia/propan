@@ -36,6 +36,8 @@ class ClauseRef {
  public:
     /// Reference to no clause.
     static constexpr uint32_t UNDEF = UINT32_MAX;
+    /// Largest offset of a clause; the topmost bit is free for tagging references (see WatchPropagator).
+    static constexpr uint32_t MAX_OFFSET = (uint32_t(1) << 31) - 1;
 
     /// Reference to no clause (#UNDEF).
     constexpr ClauseRef() noexcept : offset_(UNDEF) { }
@@ -187,8 +189,17 @@ class BasicClauseView {
     }
 
     /// Search position for watch replacement (propagator scratch, initially 2).
-    uint32_t pos() const noexcept { return std::bit_cast<uint32_t>(words_[2]); }
-    void setPos(uint32_t pos) const noexcept requires (!Const) { words_[2] = std::bit_cast<Lit>(pos); }
+    uint32_t pos() const noexcept { return word(2) & POS_MASK; }
+    void setPos(uint32_t pos) const noexcept requires (!Const) {
+        assert(pos <= POS_MASK);
+        setWord(2, (word(2) & ~POS_MASK) | pos);
+    }
+
+    /// Glue (LBD) or any other 8-bit clause score; 0 initially.
+    uint8_t glue() const noexcept { return static_cast<uint8_t>(word(2) >> POS_BITS); }
+    void setGlue(uint8_t glue) const noexcept requires (!Const) {
+        setWord(2, (word(2) & POS_MASK) | (uint32_t(glue) << POS_BITS));
+    }
 
     uint32_t size() const noexcept { return header().size(); }
     bool empty() const noexcept { return size() == 0; }
@@ -204,6 +215,14 @@ class BasicClauseView {
     operator BasicClauseView<true>() const noexcept requires (!Const) { return { words_, ref_ }; }
 
  private:
+    /// The position word holds the search position in its lower bits and the glue in the top byte.
+    static constexpr unsigned POS_BITS = 24;
+    static constexpr uint32_t POS_MASK = (uint32_t(1) << POS_BITS) - 1;
+    static_assert(ClauseHeader::MAX_SIZE <= POS_MASK);
+
+    uint32_t word(std::size_t i) const noexcept { return std::bit_cast<uint32_t>(words_[i]); }
+    void setWord(std::size_t i, uint32_t w) const noexcept requires (!Const) { words_[i] = std::bit_cast<Lit>(w); }
+
     pointer words_;
     ClauseRef ref_;
 };
@@ -214,7 +233,7 @@ using ConstClauseView = BasicClauseView<true>;
 /**
  * @brief Flat clause storage with direct offset references and stable dense IDs.
  *
- * Live layout: `[payload/flags][id][pos][literals...]`. Deleted records use
+ * Live layout: `[payload/flags][id][glue:8|pos:24][literals...]`. Deleted records use
  * `[payload/deleted][unused...]`, permitting single-word padding.
  * Every record occupies 1 + payload words, regardless of deletion.
  * All words are Lit objects; headers, IDs and positions are stored in
@@ -268,26 +287,46 @@ class ClauseArena {
 
     using iterator = Iterator<false>;
     using const_iterator = Iterator<true>;
-    using Relocation = std::pair<ClauseRef, ClauseRef>;
+
+    /// Old-to-new reference mapping returned by compact(). Deleted clauses are not mapped.
+    class Relocation {
+     public:
+        /// New reference of a clause that was live at compaction. @pre `ref` was live
+        ClauseRef operator()(ClauseRef ref) const {
+            auto it = std::lower_bound(map_.begin(), map_.end(), ref,
+                [](const std::pair<ClauseRef, ClauseRef>& r, ClauseRef ref) { return r.first.offset() < ref.offset(); });
+            assert(it != map_.end() && it->first == ref);
+            return it->second;
+        }
+
+        bool empty() const noexcept { return map_.empty(); }
+        std::size_t size() const noexcept { return map_.size(); }
+        auto begin() const noexcept { return map_.begin(); }
+        auto end() const noexcept { return map_.end(); }
+
+     private:
+        friend class ClauseArena;
+        std::vector<std::pair<ClauseRef, ClauseRef>> map_;  ///< sorted by old offset
+    };
 
     ClauseArena() = default;
     ClauseArena(const ClauseArena&) = default;
     ClauseArena& operator=(const ClauseArena&) = default;
 
     /// Leaves `other` empty.
-    ClauseArena(ClauseArena&& other) noexcept
-        : lits_(std::exchange(other.lits_, {})), refs_(std::exchange(other.refs_, {})),
-          count_(std::exchange(other.count_, 0)), n_lits_(std::exchange(other.n_lits_, 0)) { }
+    ClauseArena(ClauseArena&& other) noexcept : ClauseArena() { swap(other); }
 
     /// Leaves `other` empty.
     ClauseArena& operator=(ClauseArena&& other) noexcept {
-        if (this != &other) {
-            lits_ = std::exchange(other.lits_, {});
-            refs_ = std::exchange(other.refs_, {});
-            count_ = std::exchange(other.count_, 0);
-            n_lits_ = std::exchange(other.n_lits_, 0);
-        }
+        ClauseArena(std::move(other)).swap(*this);
         return *this;
+    }
+
+    void swap(ClauseArena& other) noexcept {
+        lits_.swap(other.lits_);
+        refs_.swap(other.refs_);
+        std::swap(count_, other.count_);
+        std::swap(n_lits_, other.n_lits_);
     }
 
     /**
@@ -302,7 +341,7 @@ class ClauseArena {
         if (clause.size() > ClauseHeader::MAX_SIZE) {
             throw std::length_error("propan::ClauseArena: clause too long");
         }
-        if (clause.size() + ClauseHeader::PREFIX >= ClauseRef::UNDEF - lits_.size()) {
+        if (clause.size() + ClauseHeader::PREFIX > ClauseRef::MAX_OFFSET - lits_.size()) {
             throw std::length_error("propan::ClauseArena: arena full");
         }
         if (refs_.size() >= ClauseId::UNDEF) {
@@ -398,24 +437,24 @@ class ClauseArena {
 
     /**
      * @brief Removes dead storage, preserving IDs and updating refs().
-     * @return old/new offsets for every live clause, sorted by old offset
+     * @return the old-to-new mapping of every live clause
      *
      * Callers must relocate external offsets or rebuild their dependent structures
-     * before accessing clauses again. Deleted references are absent from the map.
-     * Metadata indexed by ClauseId does not need relocation.
+     * before accessing clauses again. Metadata indexed by ClauseId does not need
+     * relocation.
      */
-    std::vector<Relocation> compact() {
+    Relocation compact() {
         std::vector<Lit> packed;
-        std::vector<Relocation> relocation;
+        Relocation relocation;
         packed.reserve(n_lits_ + ClauseHeader::PREFIX * count_);
-        relocation.reserve(count_);
+        relocation.map_.reserve(count_);
         for (auto clause : *this) {
             ClauseRef next(static_cast<uint32_t>(packed.size()));
-            relocation.emplace_back(clause.ref(), next);
+            relocation.map_.emplace_back(clause.ref(), next);
             const auto first = lits_.begin() + clause.ref().offset();
             packed.insert(packed.end(), first, first + clause.size() + ClauseHeader::PREFIX);
         }
-        for (const auto& [old_ref, new_ref] : relocation) {
+        for (const auto& [old_ref, new_ref] : relocation.map_) {
             refs_[id(old_ref).index()] = new_ref;
         }
         lits_.swap(packed);
@@ -466,17 +505,6 @@ class ClauseArena {
     std::size_t count_ = 0;
     std::size_t n_lits_ = 0;
 };
-
-/**
- * @brief Looks up a reference in the relocation map returned by ClauseArena::compact().
- * @pre `ref` is a live clause of the compacted arena (deleted clauses are not in the map)
- */
-inline ClauseRef relocated(std::span<const ClauseArena::Relocation> relocation, ClauseRef ref) {
-    auto it = std::lower_bound(relocation.begin(), relocation.end(), ref,
-        [](const ClauseArena::Relocation& r, ClauseRef ref) { return r.first.offset() < ref.offset(); });
-    assert(it != relocation.end() && it->first == ref);
-    return it->second;
-}
 
 static_assert(sizeof(ClauseRef) == 4);
 static_assert(sizeof(ClauseId) == 4);

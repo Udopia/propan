@@ -105,12 +105,12 @@ TEST_CASE("integers crossing the internal buffer boundary are read correctly") {
 TEST_CASE("token longer than the internal buffer throws when it is read") {
     TempFile f(std::string(StreamBuffer::BUFFER_SIZE + 1, '1') + " 0\n");
     StreamBuffer in(f.c_str());  // opening succeeds, the token is only inspected on read
-    std::string s;
-    CHECK_THROWS_AS(in.readNumber(s), ParserException);
+    int x;
+    CHECK_THROWS_WITH_AS(in.read(x), doctest::Contains("maximum token length"), ParserException);
 
     TempFile g(std::string(StreamBuffer::BUFFER_SIZE, '1') + " 0\n");
     StreamBuffer in2(g.c_str());
-    CHECK_THROWS_AS(in2.readNumber(s), ParserException);  // no room for the terminating whitespace
+    CHECK_THROWS_WITH_AS(in2.read(x), doctest::Contains("maximum token length"), ParserException);  // no room for the terminating whitespace
 }
 
 TEST_CASE("token of almost the buffer size is read, also when it starts late in a chunk") {
@@ -119,12 +119,11 @@ TEST_CASE("token of almost the buffer size is read, also when it starts late in 
         CAPTURE(prefix);
         TempFile f(std::string(prefix, ' ') + digits + " 0");
         StreamBuffer in(f.c_str());
-        std::string s;
-        REQUIRE(in.readNumber(s));
-        CHECK(s == digits);
         int x;
-        REQUIRE(in.read(x));
-        CHECK(x == 0);
+        CHECK_THROWS_WITH_AS(in.read(x), doctest::Contains("out of range"), ParserException);  // complete, but too large
+        REQUIRE(in.skipWhitespace());
+        CHECK(*in == '7');  // not consumed
+        REQUIRE(in.skipLine() == false);  // the digits and " 0" are the only line
         CHECK_FALSE(in.read(x));
         CHECK(in.eof());
     }
@@ -221,66 +220,6 @@ TEST_CASE("skipString matches prefix and throws on mismatch") {
     CHECK(in4.eof());
 }
 
-TEST_CASE("readNumber returns digits as string, keeping '-' and leading zeros") {
-    TempFile f("-123 +45 007 340282366920938463463374607431768211456 9x\n");
-    StreamBuffer in(f.c_str());
-    std::string s;
-    REQUIRE(in.readNumber(s));
-    CHECK(s == "-123");
-    REQUIRE(in.readNumber(s));
-    CHECK(s == "45");
-    REQUIRE(in.readNumber(s));
-    CHECK(s == "007");
-    REQUIRE(in.readNumber(s));
-    CHECK(s == "340282366920938463463374607431768211456");  // 2^128, beyond any integer type
-    REQUIRE(in.readNumber(s));
-    CHECK(s == "9");
-    CHECK(*in == 'x');
-    CHECK_THROWS_AS(in.readNumber(s), ParserException);
-    CHECK_FALSE(StreamBuffer(TempFile("\n").c_str()).readNumber(s));
-}
-
-TEST_CASE("skipNumber skips signed numbers and rejects other tokens") {
-    TempFile f("1 -2 +3 x");
-    StreamBuffer in(f.c_str());
-    REQUIRE(in.skipNumber());
-    REQUIRE(in.skipNumber());
-    REQUIRE(in.skipNumber());
-    CHECK(*in == ' ');
-    CHECK_THROWS_AS(in.skipNumber(), ParserException);
-    CHECK_FALSE(StreamBuffer(TempFile("").c_str()).skipNumber());
-}
-
-TEST_CASE("readClause skips header and comments") {
-    TempFile f("c hello\np cnf 3 2\n1 -2 0\nc mid\n3 0\n");
-    StreamBuffer in(f.c_str());
-    Cl c;
-    REQUIRE(in.readClause(c));
-    CHECK(c == Cl { Lit(1), Lit(-2) });
-    REQUIRE(in.readClause(c));
-    CHECK(c == Cl { Lit(3) });
-    CHECK_FALSE(in.readClause(c));
-    CHECK(c.empty());
-}
-
-TEST_CASE("readClause accepts a final clause without terminating 0 and clears the output at eof") {
-    TempFile f("1 2 0\n-3");
-    StreamBuffer in(f.c_str());
-    Cl c;
-    REQUIRE(in.readClause(c));
-    CHECK(c == Cl { Lit(1), Lit(2) });
-    REQUIRE(in.readClause(c));
-    CHECK(c == Cl { Lit(-3) });
-    CHECK_FALSE(in.readClause(c));
-    CHECK(c.empty());
-
-    TempFile g("c only comments\nc here\n");
-    StreamBuffer in2(g.c_str());
-    c.push_back(Lit(9));
-    CHECK_FALSE(in2.readClause(c));
-    CHECK(c.empty());
-}
-
 TEST_CASE("CR-only line endings are treated as line ends") {
     TempFile f("c comment\r1 2 0\r3 0\r");
     StreamBuffer in(f.c_str());
@@ -319,9 +258,11 @@ TEST_CASE("skipBlanks reports whether another token follows on the same line") {
 TEST_CASE("non-ASCII bytes in comments are skipped") {
     TempFile f("c gr\xc3\xbc\xc3\x9f \xff\xfe\n1 0\n");
     StreamBuffer in(f.c_str());
-    Cl c;
-    REQUIRE(in.readClause(c));
-    CHECK(c == Cl { Lit(1, false) });
+    REQUIRE(in.skipWhitespace());
+    REQUIRE(in.skipLine());
+    int x;
+    REQUIRE(in.read(x));
+    CHECK(x == 1);
 }
 
 TEST_CASE("corrupt compressed input throws instead of returning garbage") {
@@ -333,7 +274,7 @@ TEST_CASE("corrupt compressed input throws instead of returning garbage") {
     REQUIRE(gz.size() > 20);
     std::string corrupt = gz.substr(0, 10) + std::string(gz.size() - 10, '\x5a');
     TempFile f(corrupt, ".cnf.gz");
-    CHECK_THROWS_AS({ StreamBuffer in(f.c_str()); Cl c; while (in.readClause(c)) { } }, ParserException);
+    CHECK_THROWS_AS(readAll(f.c_str()), ParserException);
 }
 
 TEST_CASE("missing file throws") {
@@ -349,13 +290,8 @@ TEST_CASE("empty file is a valid empty stream for every operation") {
     CHECK_FALSE(in.skipWhitespace());
     CHECK_FALSE(in.skipBlanks());
     CHECK_FALSE(in.skipLine());
-    CHECK_FALSE(in.skipNumber());
     int x;
     CHECK_FALSE(in.read(x));
-    std::string s;
-    CHECK_FALSE(in.readNumber(s));
-    Cl c;
-    CHECK_FALSE(in.readClause(c));
     CHECK_THROWS_AS(in.skipString("p"), ParserException);
     CHECK(in.eof());
 }

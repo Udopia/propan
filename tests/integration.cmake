@@ -4,8 +4,8 @@
 set(INSTANCES ${CMAKE_CURRENT_SOURCE_DIR}/data/instances)
 
 function(add_probe_tests name file expected)
-    foreach(prop occ watch bin)
-        add_test(NAME probe.${name}.${prop} COMMAND probe ${INSTANCES}/${file} ${prop})
+    foreach(prop occ watch)
+        add_test(NAME probe.${name}.${prop} COMMAND probe ${INSTANCES}/${file} -p ${prop})
         set_tests_properties(probe.${name}.${prop} PROPERTIES
             PASS_REGULAR_EXPRESSION "${expected}" TIMEOUT 120 LABELS integration)
     endforeach()
@@ -61,19 +61,19 @@ add_probe_tests(uaq_nr_nr120_nc40_n3_k2_rpp4_ppr2_plb50 uaq-nr-nr120-nc40-n3-k2-
     "c probes 633 failed 0 lifted 0 implied 1889.*c soft\-true 0 lower\-bound 0.*c block conflicting implied 0.*c greedy\-skipped 57 weight 57.*s UNKNOWN")
 
 # SLUR solves these mostly-Horn instances without giving up.
-foreach(prop occ watch bin)
+foreach(prop occ watch)
     foreach(k 1 2 -2)
         foreach(inst_seed "satsgi-n28himBHm30-p0-q333;3" "289-sat-14x8;1")
             list(GET inst_seed 0 inst)
             list(GET inst_seed 1 seed)
             add_test(NAME slursat.${inst}.k${k}.${prop}
-                COMMAND slursat ${INSTANCES}/${inst}.cnf.xz ${seed} ${k} ${prop})
+                COMMAND slursat ${INSTANCES}/${inst}.cnf.xz -s ${seed} -k ${k} -p ${prop})
             set_tests_properties(slursat.${inst}.k${k}.${prop} PROPERTIES
                 PASS_REGULAR_EXPRESSION "s SATISFIABLE" FAIL_REGULAR_EXPRESSION "ERROR"
                 TIMEOUT 60 LABELS integration)
         endforeach()
     endforeach()
     # SLUR(k) gives up on the pigeon hole formula quickly, for every k.
-    add_test(NAME slursat.php15.k3.${prop} COMMAND slursat ${INSTANCES}/php15-mixed-15percent-blocked.cnf.xz 1 3 ${prop})
+    add_test(NAME slursat.php15.k3.${prop} COMMAND slursat ${INSTANCES}/php15-mixed-15percent-blocked.cnf.xz -s 1 -k 3 -p ${prop})
     set_tests_properties(slursat.php15.k3.${prop} PROPERTIES PASS_REGULAR_EXPRESSION "s UNKNOWN" TIMEOUT 60 LABELS integration)
 endforeach()

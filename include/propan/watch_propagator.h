@@ -76,16 +76,22 @@ class WatchPropagator : public Propagator {
         }
     }
 
-    void relocate(std::span<const ClauseArena::Relocation> relocation) override {
+    void relocate(const ClauseArena::Relocation& relocation) override {
         for (auto& list : watches_) {
-            for (Watch& w : list) w = Watch(w.blocker, relocated(relocation, w.ref()), w.binary());
+            for (Watch& w : list) w = Watch(w.blocker, relocation(w.ref()), w.binary());
         }
     }
 
+    void resize(unsigned n_vars) override { watches_.resize(n_vars); }
+
     ClauseRef propagate() override {
         while (trail_.head < trail_.size()) {
+            PROPAN_STAT(stats_.propagations);
             const ClauseRef conflict = propagateList(-trail_[trail_.head++]);
-            if (conflict != ClauseRef()) return conflict;
+            if (conflict != ClauseRef()) {
+                PROPAN_STAT(stats_.conflicts);
+                return conflict;
+            }
         }
         return ClauseRef();
     }
@@ -93,11 +99,11 @@ class WatchPropagator : public Propagator {
  protected:
     /// A watched clause with a blocking literal; binary clauses are tagged in the reference word.
     struct Watch {
-        static constexpr uint32_t BINARY = uint32_t(1) << 31;
+        static constexpr uint32_t BINARY = ClauseRef::MAX_OFFSET + 1;  // the bit above every valid offset
 
         Watch(Lit blocker, ClauseRef ref, bool binary) noexcept
             : blocker(blocker), data(ref.offset() | (binary ? BINARY : 0)) {
-            assert(!(ref.offset() & BINARY));
+            assert(ref.offset() <= ClauseRef::MAX_OFFSET);
         }
 
         ClauseRef ref() const noexcept { return ClauseRef(data & ~BINARY); }
@@ -118,6 +124,7 @@ class WatchPropagator : public Propagator {
         ClauseRef conflict;
         while (i != end) {
             const Watch w = *i++;
+            PROPAN_STAT(stats_.visits);
             const Val blocker_value = trail_.value(w.blocker);
             if (blocker_value == VAL_TRUE) {
                 *j++ = w;  // satisfied, clause not visited
@@ -127,48 +134,75 @@ class WatchPropagator : public Propagator {
                     conflict = w.ref();
                     break;
                 }
+                PROPAN_STAT(stats_.assigned);
                 trail_.assign(w.blocker, w.ref());
             } else {
-                ClauseView c = clauses_[w.ref()];
-                Lit* const lits = c.data();
-                if (lits[0] == falsified) std::swap(lits[0], lits[1]);
-                assert(lits[1] == falsified);
-                const Lit other = lits[0];
-                const Val other_value = other == w.blocker ? blocker_value : trail_.value(other);
-                if (other_value == VAL_TRUE) {
-                    *j++ = Watch(other, w.ref(), false);  // satisfied by the other watch: remember it
-                    continue;
-                }
-                // Circular search for a non-false replacement, resuming at pos.
-                const uint32_t size = c.size();
-                const uint32_t pos = c.pos();
-                assert(2 <= pos && pos <= size);
-                uint32_t k = pos;
-                Val v = VAL_FALSE;
-                while (k < size && (v = trail_.value(lits[k])) == VAL_FALSE) ++k;
-                if (v == VAL_FALSE) {
-                    k = 2;
-                    while (k < pos && (v = trail_.value(lits[k])) == VAL_FALSE) ++k;
-                }
-                c.setPos(k == size ? 2 : k);
-                if (v == VAL_TRUE) {
-                    *j++ = Watch(lits[k], w.ref(), false);  // satisfied: only update the blocker
-                } else if (v == VAL_UNASSIGNED) {
-                    std::swap(lits[1], lits[k]);  // move the watch, dropping it from this list
-                    watches_[lits[1]].emplace_back(other, w.ref(), false);
-                } else {
-                    *j++ = w;
-                    if (other_value == VAL_FALSE) {
-                        conflict = w.ref();
-                        break;
-                    }
-                    trail_.assign(other, w.ref());
+                const Visit v = visit(w, falsified, blocker_value);
+                if (v.keep) *j++ = v.watch;
+                if (v.conflict) {
+                    conflict = w.ref();
+                    break;
                 }
             }
         }
         if (conflict != ClauseRef()) j = std::copy(i, end, j);
         ws.erase(ws.begin() + (j - begin), ws.end());
         return conflict;
+    }
+
+    /// Outcome of visiting a clause: whether to keep a (possibly updated) watch in the list, and whether it conflicts.
+    struct Visit {
+        Watch watch;
+        bool keep;
+        bool conflict;
+    };
+
+    /**
+     * Visits a clause of size > 2 whose watched literal `falsified` became false:
+     * updates the blocking literal, moves the watch to a replacement literal, or
+     * assigns the other watched literal.
+     */
+    Visit visit(const Watch w, Lit falsified, Val blocker_value) {
+        PROPAN_STAT(stats_.clauses);
+        ClauseView c = clauses_[w.ref()];
+        Lit* const lits = c.data();
+        if (lits[0] == falsified) std::swap(lits[0], lits[1]);
+        assert(lits[1] == falsified);
+        const Lit other = lits[0];
+        const Val other_value = other == w.blocker ? blocker_value : trail_.value(other);
+        if (other_value == VAL_TRUE) return { Watch(other, w.ref(), false), true, false };  // satisfied: remember it
+        const uint32_t k = findReplacement(c);
+        if (k < c.size()) {
+            if (trail_.value(lits[k]) == VAL_TRUE) return { Watch(lits[k], w.ref(), false), true, false };
+            std::swap(lits[1], lits[k]);  // move the watch, dropping it from this list
+            watches_[lits[1]].emplace_back(other, w.ref(), false);
+            return { w, false, false };
+        }
+        if (other_value == VAL_FALSE) return { w, true, true };
+        PROPAN_STAT(stats_.assigned);
+        trail_.assign(other, w.ref());
+        return { w, true, false };
+    }
+
+    /**
+     * Circular search for a non-false literal at index >= 2, resuming at the
+     * clause's pos() and storing where it stopped.
+     * @return the index found, or size() if all are false
+     */
+    uint32_t findReplacement(ClauseView c) const {
+        const Lit* const lits = c.data();
+        const uint32_t size = c.size();
+        const uint32_t pos = c.pos();
+        assert(2 <= pos && pos <= size);
+        uint32_t k = pos;
+        while (k < size && trail_.value(lits[k]) == VAL_FALSE) ++k;
+        if (k == size) {
+            k = 2;
+            while (k < pos && trail_.value(lits[k]) == VAL_FALSE) ++k;
+            if (k == pos) k = size;
+        }
+        c.setPos(k == size ? 2 : k);
+        return k;
     }
 
     /// Preference for watching: non-false literals, then false ones by descending level.

@@ -3,7 +3,7 @@
 
 /**
  * @file cnf_formula.h
- * @brief Formula in conjunctive normal form, stored in a ClauseArena.
+ * @brief Formula in conjunctive normal form, stored in a ClauseArena. See dimacs.h for file input.
  */
 
 #pragma once
@@ -16,7 +16,6 @@
 
 #include "propan/clause_arena.h"
 #include "propan/solver_types.h"
-#include "propan/stream_buffer.h"
 
 namespace propan {
 
@@ -36,26 +35,22 @@ class CNFFormula {
 
     CNFFormula() = default;
 
-    /**
-     * @brief Reads a DIMACS CNF file, possibly compressed.
-     * @throw ParserException on I/O or format errors
-     */
-    explicit CNFFormula(const char* filename) { readDimacsFromFile(filename); }
-
     CNFFormula(const CNFFormula&) = default;
     CNFFormula& operator=(const CNFFormula&) = default;
 
     /// Leaves `other` empty.
-    CNFFormula(CNFFormula&& other) noexcept
-        : clauses_(std::move(other.clauses_)), variables_(std::exchange(other.variables_, 0)) { }
+    CNFFormula(CNFFormula&& other) noexcept : CNFFormula() { swap(other); }
 
     /// Leaves `other` empty.
     CNFFormula& operator=(CNFFormula&& other) noexcept {
-        if (this != &other) {
-            clauses_ = std::move(other.clauses_);
-            variables_ = std::exchange(other.variables_, 0);
-        }
+        CNFFormula(std::move(other)).swap(*this);
         return *this;
+    }
+
+    void swap(CNFFormula& other) noexcept {
+        clauses_.swap(other.clauses_);
+        std::swap(variables_, other.variables_);
+        buffer_.swap(other.buffer_);
     }
 
     const_iterator begin() const { return clauses_.begin(); }
@@ -89,37 +84,6 @@ class CNFFormula {
     void clear() noexcept {
         clauses_.clear();
         variables_ = 0;
-    }
-
-    /**
-     * @brief Reads clauses from a DIMACS CNF file, possibly compressed, and adds them.
-     *
-     * Variables declared in the header count in nVars() even if unused.
-     * @throw ParserException on I/O or format errors
-     */
-    void readDimacsFromFile(const char* filename) {
-        StreamBuffer in(filename);
-        Cl clause;
-        while (in.skipWhitespace()) {
-            if (*in == 'p' || *in == 'c') {
-                if (*in == 'p') {
-                    in.skipString("p cnf");
-                    int vars;
-                    if (in.read(vars) && vars > 0) {
-                        ensureVars(static_cast<unsigned>(vars));
-                    }
-                }
-                if (!in.skipLine()) break;
-            } else {
-                int plit;
-                while (in.read(plit)) {
-                    if (plit == 0) break;
-                    clause.push_back(Lit(plit));
-                }
-                addClause(clause);
-                clause.clear();
-            }
-        }
     }
 
     /// Normalizes and adds the clause. @return false if it was dropped as a tautology

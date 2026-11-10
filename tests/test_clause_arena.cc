@@ -136,6 +136,15 @@ TEST_CASE("clauses store size and flags, dense ID, then literals") {
     CHECK(asCl(a[ClauseId(1)]) == lits({ 3 }));
     CHECK(std::bit_cast<ClauseId>(a.data()[r2.offset() + 1]) == ClauseId(1));
     CHECK(a[r2].pos() == 2);
+    CHECK(a[r2].glue() == 0);
+    a[r2].setGlue(200);
+    a[r2].setPos(3);
+    CHECK(a[r2].glue() == 200);
+    CHECK(a[r2].pos() == 3);
+    a[r2].setPos(2);
+    CHECK(a[r2].glue() == 200);
+    a[r2].setGlue(0);
+    CHECK(a[r2].pos() == 2);
     CHECK(a.nWords() == 15);
 }
 
@@ -357,10 +366,13 @@ TEST_CASE("compaction preserves IDs and metadata and returns reference relocatio
     a.shrink(first, 2);
     a.erase(deleted);
     const auto relocation = a.compact();
-    const std::vector<ClauseArena::Relocation> expected{
+    const std::vector<std::pair<ClauseRef, ClauseRef>> expected{
         { first, ClauseRef(0) }, { empty, ClauseRef(5) }, { last, ClauseRef(8) }
     };
-    CHECK(relocation == expected);
+    CHECK(std::vector<std::pair<ClauseRef, ClauseRef>>(relocation.begin(), relocation.end()) == expected);
+    CHECK(relocation(first) == ClauseRef(0));
+    CHECK(relocation(empty) == ClauseRef(5));
+    CHECK(relocation(last) == ClauseRef(8));
     CHECK(a.nWords() == a.nLits() + ClauseHeader::PREFIX * a.size());
     CHECK(a.ref(ClauseId(0)) == ClauseRef());
     CHECK(a.ref(ClauseId(1)) == ClauseRef(0));

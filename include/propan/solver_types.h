@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <ostream>
@@ -153,6 +154,9 @@ class LitMap {
 
     /// Removes all elements (zero variables).
     void clear() noexcept { data_.clear(); }
+
+    /// Sets every element to `value`.
+    void assign(const T& value) { std::fill(data_.begin(), data_.end(), value); }
 
     /// Number of variables covered.
     unsigned nVars() const noexcept { return data_.empty() ? 0 : static_cast<unsigned>(data_.size() / 2 - 1); }

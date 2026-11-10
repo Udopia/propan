@@ -3,7 +3,7 @@
 
 Checks that all propagators report identical counters and prints a timing table.
 
-    tests/benchmark.py [--build DIR] [--large] [--props occ,watch,bin] [--runs N]
+    tests/benchmark.py [--build DIR] [--large] [--props occ,watch] [--runs N]
 
 --large additionally downloads the instances listed in data/instances/large.txt
 from benchmark-database.de into DIR/benchmarks (once) and runs them too.
@@ -20,7 +20,7 @@ INSTANCES = os.path.join(HERE, "data", "instances")
 
 
 def run(probe, path, prop):
-    out = subprocess.run([probe, path, prop], capture_output=True, text=True, check=True).stdout
+    out = subprocess.run([probe, path, "-p", prop], capture_output=True, text=True, check=True).stdout
     counters = "|".join(l for l in out.splitlines() if re.match(r"^c (probes|soft-true|block|greedy|root-assigned)|^s ", l))
     time = float(re.search(r"c propagator \S+ time (\S+)", out).group(1))
     return counters, time
@@ -30,10 +30,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--build", default=os.path.join(HERE, "..", "build", "release"))
     ap.add_argument("--large", action="store_true")
-    ap.add_argument("--props", default="occ,watch,bin")
+    ap.add_argument("--props", default="occ,watch")
     ap.add_argument("--runs", type=int, default=1, help="repetitions, best time is reported")
     args = ap.parse_args()
-    probe = os.path.join(args.build, "apps", "probe")
+    probe = os.path.join(args.build, "apps", "tests", "probe")
     props = args.props.split(",")
 
     files = sorted((os.path.join(INSTANCES, f) for f in os.listdir(INSTANCES) if f.endswith(".xz")), key=str.lower)
