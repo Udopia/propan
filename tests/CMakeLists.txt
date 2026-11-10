@@ -10,7 +10,9 @@ add_executable(propan_tests
     test_clause_arena.cc
     test_cnf_formula.cc
     test_wcnf_formula.cc
-    test_trail.cc)
+    test_trail.cc
+    test_propagators.cc
+    test_use_cases.cc)
 target_link_libraries(propan_tests PRIVATE propan::propan propan_warnings propan_doctest)
 target_compile_definitions(propan_tests PRIVATE
     PROPAN_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
@@ -41,6 +43,13 @@ if(PROPAN_BUILD_APPS)
     add_test(NAME slursat.gives_up COMMAND slursat ${DATA}/php_3_2.cnf)
     set_tests_properties(slursat.gives_up PROPERTIES PASS_REGULAR_EXPRESSION "s UNKNOWN")
 
+    foreach(k 1 2 -2)
+        add_test(NAME slursat.occ.k${k} COMMAND slursat ${DATA}/sat_small.cnf 3 ${k} occ)
+        set_tests_properties(slursat.occ.k${k} PROPERTIES
+            PASS_REGULAR_EXPRESSION "s SATISFIABLE"
+            FAIL_REGULAR_EXPRESSION "ERROR;nan")
+    endforeach()
+
     add_test(NAME slursat.usage COMMAND slursat)
     set_tests_properties(slursat.usage PROPERTIES PASS_REGULAR_EXPRESSION "USAGE")
 
@@ -49,4 +58,6 @@ if(PROPAN_BUILD_APPS)
     set_tests_properties(slursat.units_only_stats PROPERTIES
         PASS_REGULAR_EXPRESSION "s SATISFIABLE"
         FAIL_REGULAR_EXPRESSION "nan;ERROR")
+
+    include(integration.cmake)
 endif()

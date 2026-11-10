@@ -70,6 +70,9 @@ class CNFFormula {
     /// The underlying clause storage.
     const ClauseArena& clauses() const noexcept { return clauses_; }
 
+    /// Mutable clause storage, e.g. for propagators that reorder literals.
+    ClauseArena& clauses() noexcept { return clauses_; }
+
     /// Number of variables (maximum variable id).
     unsigned nVars() const noexcept { return variables_; }
 

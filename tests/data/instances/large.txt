@@ -1,0 +1,9 @@
+# Larger instances for tests/benchmark.py --large, downloaded on demand from
+# https://benchmark-database.de/file/<hash>. Format: <file> <hash> <family> <variables> <clauses>
+hcp_CP16_16.cnf.xz 0f4911e1180b80b45e9db7ec5e73eb66 knights-problem 77824 283974
+safe-30-h30-sat.cnf.xz 48536cf83e806cb66dacd3c4b99952fb planning 135786 453174
+case1.normalised.cnf.xz 4e3195a382f5af213444736fcc8b364f unknown-cases 21888 253852
+grid-color-12-14-6-cb.cnf.xz 294924aff67e879595e55f15b10a79ef coloring 4382 244387
+43-102544.cnf.xz 5bd10bef0327efa339e47f7b59353bc5 station-repacking 23686 479421
+srhd-sgi-m47-q742.5-n45-p30-s17570390.cnf.xz 45a61c9b31668afc18cb4d0dbc8709ba subgraph-isomorphism 2088 405748
+UCG-10-10p1.cnf.xz 14586ca8c72a92b53755c036c38c2cef diagnosis 131242 635913

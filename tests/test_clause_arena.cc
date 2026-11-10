@@ -78,13 +78,15 @@ TEST_CASE("ClauseHeader packs size and flags into one word") {
     static_assert(sizeof(ClauseHeader) == 4);
     static_assert(ClauseHeader::FLAG_BITS + ClauseHeader::SIZE_BITS == 32);
     static_assert(ClauseHeader::MAX_PAYLOAD == (uint32_t(1) << ClauseHeader::SIZE_BITS) - 1);
-    static_assert(ClauseHeader::MAX_SIZE == ClauseHeader::MAX_PAYLOAD - 1);
+    static_assert(ClauseHeader::MAX_SIZE == ClauseHeader::MAX_PAYLOAD - ClauseHeader::META);
+    static_assert(ClauseHeader::PREFIX == 1 + ClauseHeader::META);
     constexpr ClauseHeader h(ClauseHeader::MAX_SIZE, learnedFlags());
     static_assert(h.size() == ClauseHeader::MAX_SIZE);
     static_assert(h.payload() == ClauseHeader::MAX_PAYLOAD);
-    static_assert(ClauseHeader().payload() == 1);
+    static_assert(ClauseHeader().payload() == ClauseHeader::META);
     static_assert(ClauseHeader().size() == 0);
-    static_assert(ClauseHeader(3, learnedFlags()).payload() == 4);
+    static_assert(ClauseHeader().size() == 0);
+    static_assert(ClauseHeader(3, learnedFlags()).payload() == 3 + ClauseHeader::META);
     static_assert(h.flags() == learnedFlags());
     static_assert(ClauseHeader(3, learnedFlags()).size() == 3);
     static_assert(ClauseHeader(3, learnedFlags()).flags().learned());
@@ -117,12 +119,12 @@ TEST_CASE("clauses store size and flags, dense ID, then literals") {
     CHECK(a.size() == 3);
     CHECK(a.nLits() == 6);
     CHECK(r1 == ClauseRef(0));
-    CHECK(r2 == ClauseRef(4));
-    CHECK(r3 == ClauseRef(7));
+    CHECK(r2 == ClauseRef(5));
+    CHECK(r3 == ClauseRef(9));
     CHECK(a.header(r1) == ClauseHeader(2));
     CHECK(a.header(r2) == ClauseHeader(1, learnedFlags()));
     CHECK(asCl(a[r2]) == lits({ 3 }));
-    CHECK(a[r3].data() == a.data() + 9);
+    CHECK(a[r3].data() == a.data() + 12);
     CHECK(a.refs() == std::vector<ClauseRef> { r1, r2, r3 });
     CHECK(a.id(r1) == ClauseId(0));
     CHECK(a.id(r2) == ClauseId(1));
@@ -133,7 +135,8 @@ TEST_CASE("clauses store size and flags, dense ID, then literals") {
     CHECK(a[r2].header() == ClauseHeader(1, learnedFlags()));
     CHECK(asCl(a[ClauseId(1)]) == lits({ 3 }));
     CHECK(std::bit_cast<ClauseId>(a.data()[r2.offset() + 1]) == ClauseId(1));
-    CHECK(a.nWords() == 12);
+    CHECK(a[r2].pos() == 2);
+    CHECK(a.nWords() == 15);
 }
 
 TEST_CASE("flags are mutable and do not affect size or literals") {
@@ -201,7 +204,7 @@ TEST_CASE("maximum-sized clauses can be deleted without overflowing padding size
     CHECK((*a.begin()).ref() == next);
     CHECK(++a.begin() == a.end());
     a.compact();
-    CHECK(a.nWords() == 3);
+    CHECK(a.nWords() == ClauseHeader::PREFIX + 1);
     CHECK(a.ref(ClauseId(1)) == ClauseRef(0));
 }
 
@@ -272,13 +275,13 @@ TEST_CASE("shrinking creates skippable padding including a one-word record") {
     a.shrink(first, 3);
     CHECK(a.header(first) == ClauseHeader(3, learnedFlags()));
     CHECK(asCl(a[first]) == lits({ 1, 2, 3 }));
-    CHECK(std::bit_cast<ClauseHeader>(a.data()[5]) == ClauseHeader::padding(0));
+    CHECK(std::bit_cast<ClauseHeader>(a.data()[6]) == ClauseHeader::padding(0));
     a.shrink(first, 1);
-    CHECK(a.header(first).payload() == 2);
-    CHECK(std::bit_cast<ClauseHeader>(a.data()[3]) == ClauseHeader::padding(1));
+    CHECK(a.header(first).payload() == 1 + ClauseHeader::META);
+    CHECK(std::bit_cast<ClauseHeader>(a.data()[4]) == ClauseHeader::padding(1));
     a.shrink(first, 0);
-    CHECK(a.header(first).payload() == 1);
-    CHECK(std::bit_cast<ClauseHeader>(a.data()[2]) == ClauseHeader::padding(0));
+    CHECK(a.header(first).payload() == ClauseHeader::META);
+    CHECK(std::bit_cast<ClauseHeader>(a.data()[3]) == ClauseHeader::padding(0));
     a.shrink(first, 0);
     CHECK(a[first].empty());
     CHECK(a.nLits() == 1);
@@ -304,7 +307,7 @@ TEST_CASE("deletion skips leading, middle and trailing records without reusing I
     before.setDeleted();
     a.erase(leading);
     CHECK(a.header(leading) == before);
-    CHECK(a.header(leading).payload() == 1);
+    CHECK(a.header(leading).payload() == ClauseHeader::META);
     CHECK(a.header(leading).flags().learned());
     a.erase(middle);
     a.erase(trailing);
@@ -355,14 +358,14 @@ TEST_CASE("compaction preserves IDs and metadata and returns reference relocatio
     a.erase(deleted);
     const auto relocation = a.compact();
     const std::vector<ClauseArena::Relocation> expected{
-        { first, ClauseRef(0) }, { empty, ClauseRef(4) }, { last, ClauseRef(6) }
+        { first, ClauseRef(0) }, { empty, ClauseRef(5) }, { last, ClauseRef(8) }
     };
     CHECK(relocation == expected);
-    CHECK(a.nWords() == a.nLits() + 2 * a.size());
+    CHECK(a.nWords() == a.nLits() + ClauseHeader::PREFIX * a.size());
     CHECK(a.ref(ClauseId(0)) == ClauseRef());
     CHECK(a.ref(ClauseId(1)) == ClauseRef(0));
-    CHECK(a.ref(ClauseId(2)) == ClauseRef(4));
-    CHECK(a.ref(ClauseId(3)) == ClauseRef(6));
+    CHECK(a.ref(ClauseId(2)) == ClauseRef(5));
+    CHECK(a.ref(ClauseId(3)) == ClauseRef(8));
     CHECK(asCl(a[a.ref(ClauseId(1))]) == lits({ 1, 2 }));
     CHECK(a.flags(a.ref(ClauseId(1))).learned());
     CHECK(a[a.ref(ClauseId(2))].empty());
@@ -440,8 +443,8 @@ TEST_CASE("copy and move preserve tombstones, padding and live counters") {
     b[r][0] = Lit(9);
     b.compact();
     CHECK(asCl(a[r]) == lits({ 1 }));
-    CHECK(a.nWords() == 7);
-    CHECK(b.nWords() == 3);
+    CHECK(a.nWords() == 9);
+    CHECK(b.nWords() == ClauseHeader::PREFIX + 1);
     CHECK(b.size() == 1);
     CHECK(b.nLits() == 1);
     CHECK(b.refs().size() == 2);
@@ -489,7 +492,7 @@ TEST_CASE("mixed arena mutations agree with an ID-indexed reference model") {
                 CHECK(old_refs[a.id(new_ref).index()] == old_ref);
                 CHECK(a.ref(a.id(new_ref)) == new_ref);
             }
-            CHECK(a.nWords() == a.nLits() + 2 * a.size());
+            CHECK(a.nWords() == a.nLits() + ClauseHeader::PREFIX * a.size());
         } else {
             const auto id = random() % model.size();
             if (model[id]) {

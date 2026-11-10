@@ -103,7 +103,8 @@ class ClauseFlags {
  * @brief Record header: payload length and typed clause flags.
  *
  * The lower #SIZE_BITS bits always count words following the header.
- * A live payload contains an ID and literals; deleted payload is unused.
+ * A live payload contains #META metadata words (the ID and the search
+ * position) followed by the literals; deleted payload is unused.
  */
 class ClauseHeader {
  public:
@@ -112,15 +113,20 @@ class ClauseHeader {
     /// Number of size bits.
     static constexpr unsigned SIZE_BITS = 32 - FLAG_BITS;
     static constexpr uint32_t MAX_PAYLOAD = (uint32_t(1) << SIZE_BITS) - 1;
-    /// Maximum number of literals, excluding the ID word.
-    static constexpr uint32_t MAX_SIZE = MAX_PAYLOAD - 1;
+    /// Metadata words of a live payload preceding the literals: ID and search position.
+    static constexpr uint32_t META = 2;
+    /// Words of a record preceding the literals: header and metadata.
+    static constexpr uint32_t PREFIX = 1 + META;
+    /// Maximum number of literals.
+    static constexpr uint32_t MAX_SIZE = MAX_PAYLOAD - META;
     static_assert(FLAG_BITS > 0 && FLAG_BITS < 32);
 
-    constexpr ClauseHeader() noexcept : word_(1) { }
+    /// Live header of an empty clause.
+    constexpr ClauseHeader() noexcept : word_(META) { }
 
     /// Live header with the given literal count (at most MAX_SIZE).
     constexpr ClauseHeader(uint32_t size, ClauseFlags flags = {}) noexcept
-        : word_((size + 1) | (uint32_t(flags.bits()) << SIZE_BITS)) {
+        : word_((size + META) | (uint32_t(flags.bits()) << SIZE_BITS)) {
         assert(size <= MAX_SIZE);
         assert(!flags.deleted());
     }
@@ -141,8 +147,8 @@ class ClauseHeader {
 
     /// Number of literals in a live clause.
     constexpr uint32_t size() const noexcept {
-        assert(!deleted() && payload() > 0);
-        return payload() - 1;
+        assert(!deleted() && payload() >= META);
+        return payload() - META;
     }
 
     constexpr ClauseFlags flags() const noexcept {
@@ -180,9 +186,13 @@ class BasicClauseView {
         words_[0] = std::bit_cast<Lit>(ClauseHeader(size(), flags));
     }
 
+    /// Search position for watch replacement (propagator scratch, initially 2).
+    uint32_t pos() const noexcept { return std::bit_cast<uint32_t>(words_[2]); }
+    void setPos(uint32_t pos) const noexcept requires (!Const) { words_[2] = std::bit_cast<Lit>(pos); }
+
     uint32_t size() const noexcept { return header().size(); }
     bool empty() const noexcept { return size() == 0; }
-    pointer data() const noexcept { return words_ + 2; }
+    pointer data() const noexcept { return words_ + ClauseHeader::PREFIX; }
     pointer begin() const noexcept { return data(); }
     pointer end() const noexcept { return data() + size(); }
     auto& operator[](std::size_t i) const noexcept { return data()[i]; }
@@ -204,11 +214,11 @@ using ConstClauseView = BasicClauseView<true>;
 /**
  * @brief Flat clause storage with direct offset references and stable dense IDs.
  *
- * Live layout: `[payload/flags][id][literals...]`. Deleted records use
+ * Live layout: `[payload/flags][id][pos][literals...]`. Deleted records use
  * `[payload/deleted][unused...]`, permitting single-word padding.
  * Every record occupies 1 + payload words, regardless of deletion.
- * All words are Lit objects; headers and IDs are stored in literal slots
- * via std::bit_cast.
+ * All words are Lit objects; headers, IDs and positions are stored in
+ * literal slots via std::bit_cast.
  * Iteration scans physical records, not the ID-to-reference table.
  *
  * Adding may invalidate views and iterators; shrinking/deleting invalidates
@@ -292,7 +302,7 @@ class ClauseArena {
         if (clause.size() > ClauseHeader::MAX_SIZE) {
             throw std::length_error("propan::ClauseArena: clause too long");
         }
-        if (clause.size() + 2 >= ClauseRef::UNDEF - lits_.size()) {
+        if (clause.size() + ClauseHeader::PREFIX >= ClauseRef::UNDEF - lits_.size()) {
             throw std::length_error("propan::ClauseArena: arena full");
         }
         if (refs_.size() >= ClauseId::UNDEF) {
@@ -305,13 +315,14 @@ class ClauseArena {
         const std::size_t source = internal ? clause.data() - lits_.data() : 0;
         const std::size_t size = clause.size();
         ClauseRef ref(static_cast<uint32_t>(lits_.size()));
-        reserveFor(lits_, lits_.size() + size + 2);
+        reserveFor(lits_, lits_.size() + size + ClauseHeader::PREFIX);
         reserveFor(refs_, refs_.size() + 1);
         if (internal) clause = { lits_.data() + source, size };
-        lits_.resize(lits_.size() + size + 2);
+        lits_.resize(lits_.size() + size + ClauseHeader::PREFIX);
         lits_[ref.offset()] = std::bit_cast<Lit>(ClauseHeader(static_cast<uint32_t>(size), flags));
         lits_[ref.offset() + 1] = std::bit_cast<Lit>(ClauseId(static_cast<uint32_t>(refs_.size())));
-        std::copy(clause.begin(), clause.end(), lits_.begin() + ref.offset() + 2);
+        lits_[ref.offset() + 2] = std::bit_cast<Lit>(uint32_t(2));
+        std::copy(clause.begin(), clause.end(), lits_.begin() + ref.offset() + ClauseHeader::PREFIX);
         refs_.push_back(ref);
         ++count_;
         n_lits_ += size;
@@ -360,14 +371,16 @@ class ClauseArena {
     /// ID-to-reference table, including UNDEF slots for deleted clauses.
     const std::vector<ClauseRef>& refs() const noexcept { return refs_; }
 
-    /// Keeps the first `size` literals; arrange retained literals before calling.
+    /// Keeps the first `size` literals and resets pos(); arrange retained literals before calling.
     void shrink(ClauseRef ref, uint32_t size) {
         ClauseHeader h = header(ref);
         assert(!h.deleted());
         if (size > h.size()) throw std::invalid_argument("propan::ClauseArena: shrink would grow clause");
         if (size == h.size()) return;
-        lits_[ref.offset() + 2 + size] = std::bit_cast<Lit>(ClauseHeader::padding(h.size() - size - 1));
+        lits_[ref.offset() + ClauseHeader::PREFIX + size] =
+            std::bit_cast<Lit>(ClauseHeader::padding(h.size() - size - 1));
         lits_[ref.offset()] = std::bit_cast<Lit>(ClauseHeader(size, h.flags()));
+        lits_[ref.offset() + 2] = std::bit_cast<Lit>(uint32_t(2));  // reset the search position
         n_lits_ -= h.size() - size;
     }
 
@@ -394,13 +407,13 @@ class ClauseArena {
     std::vector<Relocation> compact() {
         std::vector<Lit> packed;
         std::vector<Relocation> relocation;
-        packed.reserve(n_lits_ + 2 * count_);
+        packed.reserve(n_lits_ + ClauseHeader::PREFIX * count_);
         relocation.reserve(count_);
         for (auto clause : *this) {
             ClauseRef next(static_cast<uint32_t>(packed.size()));
             relocation.emplace_back(clause.ref(), next);
             const auto first = lits_.begin() + clause.ref().offset();
-            packed.insert(packed.end(), first, first + clause.size() + 2);
+            packed.insert(packed.end(), first, first + clause.size() + ClauseHeader::PREFIX);
         }
         for (const auto& [old_ref, new_ref] : relocation) {
             refs_[id(old_ref).index()] = new_ref;
@@ -453,6 +466,17 @@ class ClauseArena {
     std::size_t count_ = 0;
     std::size_t n_lits_ = 0;
 };
+
+/**
+ * @brief Looks up a reference in the relocation map returned by ClauseArena::compact().
+ * @pre `ref` is a live clause of the compacted arena (deleted clauses are not in the map)
+ */
+inline ClauseRef relocated(std::span<const ClauseArena::Relocation> relocation, ClauseRef ref) {
+    auto it = std::lower_bound(relocation.begin(), relocation.end(), ref,
+        [](const ClauseArena::Relocation& r, ClauseRef ref) { return r.first.offset() < ref.offset(); });
+    assert(it != relocation.end() && it->first == ref);
+    return it->second;
+}
 
 static_assert(sizeof(ClauseRef) == 4);
 static_assert(sizeof(ClauseId) == 4);

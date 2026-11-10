@@ -1,9 +1,14 @@
 #include <cassert>
+#include <iostream>
+#include <memory>
 #include <random>
 
 #include "propan/cnf_formula.h"
 #include "propan/wcnf_formula.h"
+#include "propan/occurrence_propagator.h"
+#include "propan/propagator.h"
 #include "propan/trail.h"
+#include "propan/watch_propagator.h"
 
 #include <numeric>
 #include <algorithm>
@@ -39,15 +44,42 @@ std::vector<Lit> get_permutation(size_t nVars, size_t seed) {
     return perm;
 }
 
-// SLUR(k) algorithm, with immediate propagation
-bool slurpk(std::vector<Lit> lits, Trail& trail, unsigned k) {
-    bool conflict = false;
+// SLUR(k) with immediate propagation: every decision gets its own level, a
+// conflict backtracks the whole block and tries the next polarity vector.
+bool slurpk(std::vector<Lit> lits, Trail& trail, Propagator& prop, unsigned k) {
     for (unsigned i = 0; i < lits.size(); i += k) {
-        for (uint64_t bv = 0; bv < (1ULL << k); ++bv) {
-            if (conflict) {
-                trail.backtrack();
-                conflict = false;
+        const unsigned base = trail.level();
+        bool conflict = true;
+        for (uint64_t bv = 0; bv < (1ULL << k) && conflict; ++bv) {
+            trail.backtrackTo(base);
+            conflict = false;
+            unsigned c = 0, j = 0;
+            while (c < k && i + j < lits.size()) {
+                while (i + j < lits.size() && trail.value(lits[i + j].var()) != VAL_UNASSIGNED) {
+                    ++j;
+                }
+                if (i + j >= lits.size()) break;
+                trail.newLevel();
+                trail.push((bv & (1ULL << c)) ? lits[i + j] : -lits[i + j]);
+                c++;
+                if (prop.propagate() != ClauseRef()) {
+                    conflict = true;
+                    break;
+                }
             }
+        }
+        if (conflict) return false;
+    }
+    return true;
+}
+
+// SLUR(k): a block of up to k decisions forms one level and is propagated at once.
+bool slurk(std::vector<Lit> lits, Trail& trail, Propagator& prop, unsigned k) {
+    for (unsigned i = 0; i < lits.size(); i += k) {
+        const unsigned base = trail.level();
+        bool conflict = true;
+        for (uint64_t bv = 0; bv < (1ULL << k) && conflict; ++bv) {
+            trail.backtrackTo(base);
             trail.newLevel();
             unsigned c = 0, j = 0;
             while (c < k && i + j < lits.size()) {
@@ -55,58 +87,27 @@ bool slurpk(std::vector<Lit> lits, Trail& trail, unsigned k) {
                     ++j;
                 }
                 if (i + j >= lits.size()) break;
-                Lit lit = (bv & (1ULL << c)) ? lits[i + j] : -lits[i + j];
-                trail.push(lit);
+                trail.push((bv & (1ULL << c)) ? lits[i + j] : -lits[i + j]);
                 c++;
-                conflict = !trail.propagate();
-                if (conflict) break;
             }
-            if (!conflict) break;
+            conflict = prop.propagate() != ClauseRef();
         }
         if (conflict) return false;
     }
     return true;
 }
 
-// SLUR(k) algorithm
-bool slurk(std::vector<Lit> lits, Trail& trail, unsigned k) {
-    bool conflict = false;
-    for (unsigned i = 0; i < lits.size(); i += k) {
-        for (uint64_t bv = 0; bv < (1ULL << k); ++bv) {
-            if (conflict) {
-                trail.backtrack();
-                conflict = false;
-            }
-            trail.newLevel();
-            unsigned c = 0, j = 0;
-            while (c < k && i + j < lits.size()) {
-                while (i + j < lits.size() && trail.value(lits[i + j].var()) != VAL_UNASSIGNED) {
-                    ++j;
-                }
-                if (i + j >= lits.size()) break;
-                Lit lit = (bv & (1ULL << c)) ? lits[i + j] : -lits[i + j];
-                trail.push(lit);
-                c++;
-            }
-            conflict = !trail.propagate();
-            if (!conflict) break;
-        }
-        if (conflict) return false;
-    }
-    return true;
-}
-
-// SLUR algorithm
-bool slursat(std::vector<Lit> lits, Trail& trail) {
+// SLUR: one decision per level, each polarity tried once.
+bool slursat(std::vector<Lit> lits, Trail& trail, Propagator& prop) {
     for (Lit lit : lits) {
         if (trail.value(lit.var()) == VAL_UNASSIGNED) {
             trail.newLevel();
             trail.push(lit);
-            if (!trail.propagate()) {
+            if (prop.propagate() != ClauseRef()) {
                 trail.backtrack();
                 trail.newLevel();
                 trail.push(-lit);
-                if (!trail.propagate()) {
+                if (prop.propagate() != ClauseRef()) {
                     return false;
                 }
             }
@@ -117,7 +118,7 @@ bool slursat(std::vector<Lit> lits, Trail& trail) {
 
 int main(int argc, char **argv) {
 	if (argc < 2) {
-		std::cout << "USAGE: ./slur <path/to/dimacs/cnf/formula> [seed] [k]" << std::endl;
+		std::cout << "USAGE: ./slur <path/to/dimacs/cnf/formula> [seed] [k] [watch|occ]" << std::endl;
 		return 0;
 	}
 
@@ -141,8 +142,15 @@ int main(int argc, char **argv) {
 
 	std::cout << "c Testing if formula " << argv[1] << " can be solved by SLUR algorithm." << std::endl;
 
-    Trail trail {};
-    if (!trail.init(formula)) {
+    Trail trail(formula.nVars());
+    std::unique_ptr<Propagator> propagator;
+    if (argc > 4 && std::string(argv[4]) == "occ") {
+        propagator = std::make_unique<OccurrencePropagator>(formula.clauses(), trail);
+    } else {
+        propagator = std::make_unique<WatchPropagator>(formula.clauses(), trail);
+    }
+    Propagator& prop = *propagator;
+    if (!prop.attachAll(formula.clauses()) || prop.propagate() != ClauseRef()) {
         std::cout << "s UNSATISFIABLE" << std::endl;
         return 0;
     }
@@ -151,17 +159,17 @@ int main(int argc, char **argv) {
 
     bool result = false;
     if (abs(k) <= 1) {
-        result = slursat(perm, trail);
+        result = slursat(perm, trail, prop);
     } else if (k > 1) {
-        result = slurk(perm, trail, k);
+        result = slurk(perm, trail, prop, k);
     } else {
-        result = slurpk(perm, trail, -k);
+        result = slurpk(perm, trail, prop, -k);
     }
 
     if (result) {
         std::cout << "s SATISFIABLE" << std::endl;
-        trail.print();
-        if (!trail.satisfies(formula)) {
+        std::cout << trail << std::endl;
+        if (!satisfies(trail, formula.clauses())) {
             std::cout << "c ERROR: Trail does not satisfy the formula." << std::endl;
         }
     } else {
@@ -172,8 +180,8 @@ int main(int argc, char **argv) {
     double fraction = (double)formula.nVars() / trail.size();
 
     std::vector<int> differences;
-    for (unsigned i = 1; i <= trail.level(); ++i) {
-        differences.push_back(static_cast<int>(trail.levelStart(i) - trail.levelStart(i - 1)));
+    for (unsigned i = 0; i < trail.level(); ++i) {
+        differences.push_back(static_cast<int>(trail.literals(i).size()));
     }
     std::sort(differences.begin(), differences.end());
     if (differences.empty()) {

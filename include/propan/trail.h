@@ -3,200 +3,225 @@
 
 /**
  * @file trail.h
- * @brief The trail: assignment stack with decision levels and unit propagation.
+ * @brief The trail: assignment stack with decision levels, reasons and the propagation queue.
  */
 
 #pragma once
 
+#include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
-#include <iostream>
+#include <ostream>
 #include <span>
 #include <vector>
 
 #include "propan/clause_arena.h"
-#include "propan/cnf_formula.h"
 #include "propan/solver_types.h"
 
 namespace propan {
 
 /**
- * @brief Assignment stack ("trail") with decision levels and unit propagation.
+ * @brief Assignment stack ("trail") with decision levels and reasons.
  *
- * The trail holds the assigned literals in assignment order. It is divided
- * into decision levels: level 0 (the root level) holds the units of the
- * formula and their consequences and is never undone; every call to
- * newLevel() opens a new level, to which any number of literals may be pushed
- * (decisions) before propagate() adds their consequences. backtrack() undoes
- * the most recent level.
+ * The trail holds the assigned literals in assignment order and knows nothing
+ * about clauses: decisions are pushed by the client, implications are
+ * assigned by a Propagator, which also consumes the propagation queue
+ * `[head, size())`.
  *
- * Values are of type Val (#VAL_TRUE, #VAL_FALSE, #VAL_UNASSIGNED) and are
- * stored per literal, so that looking up the value of a literal is a single
- * load; assigning a literal writes its value and the negated value of its
- * complement.
+ * The trail is divided into decision levels. Level 0 (the root level) holds
+ * units and their consequences and is never undone. newLevel() opens a level;
+ * a level consists of a contiguous block of decisions followed by their
+ * consequences. This shape is asserted: a level may only be opened once the
+ * queue is empty (the previous level is at fixpoint or was backtracked), and
+ * a decision may only be pushed before the level was propagated. After a
+ * conflict, backtrack() or backtrackTo() must be called before anything else
+ * is pushed.
  *
- * Propagation uses occurrence lists, i.e. every clause is visited whenever
- * one of its literals becomes false.
+ * A decision is a literal without reason (#ClauseRef UNDEF); the decisions of
+ * a level are the leading literals of literals(level) with isDecision() true.
+ *
+ * Assigning a literal at a level below the current one (out-of-order
+ * assignment, as in chronological backtracking) is supported: such literals
+ * are kept by backtrackToRetaining() and re-propagated, whereas backtrack()
+ * and backtrackTo() assume there are none. Hence literals(level) is the trail
+ * segment opened at that level; it may contain literals of lower levels,
+ * never of higher ones. level(Var) is authoritative.
  */
 class Trail {
  public:
-    Trail() = default;
+    explicit Trail(unsigned n_vars = 0) { resize(n_vars); }
 
-    /// Resets to an empty trail over zero variables (forgets the formula).
-    void clear() {
+    /// Forgets all assignments and levels; covers variables `1..n_vars`.
+    void resize(unsigned n_vars) {
         trail_.clear();
-        trail_lim_.assign(1, 0);
+        lim_.assign(1, 0);
         val_.clear();
-        occ_.clear();
-        clauses_ = nullptr;
-        head_ = 0;
+        val_.resize(n_vars);
+        vars_.assign(n_vars + 1, VarInfo());
+        head = 0;
     }
 
-    /**
-     * @brief Initializes the trail for the given formula.
-     *
-     * Builds the occurrence lists, assigns the unit clauses on level 0 and
-     * propagates them. The formula must outlive the trail (or the next call
-     * to init()) and must not be modified while the trail uses it.
-     * @return false if the formula is refuted by unit propagation (or contains the empty clause)
-     */
-    bool init(const CNFFormula& formula) {
-        clear();
-        clauses_ = &formula.clauses();
-        occ_.resize(formula.nVars());
-        val_.resize(formula.nVars());
-        bool ok = true;
-        for (auto clause : *clauses_) {
-            if (clause.empty()) ok = false;
-            for (Lit lit : clause) {
-                occ_[lit].push_back(clause.ref());
-            }
-        }
-        for (auto clause : *clauses_) {
-            if (ok && clause.size() == 1) {
-                ok = push(clause[0]);
-            }
-        }
-        return ok && propagate();
-    }
+    unsigned nVars() const noexcept { return val_.nVars(); }
 
-    /**
-     * @brief Propagates all literals pushed since the last propagation to fixpoint.
-     * @return false on conflict (the trail is then partially propagated; backtrack)
-     */
-    bool propagate() {
-        const ClauseArena& clauses = *clauses_;
-        while (head_ < trail_.size()) {
-            Lit falsified = -trail_[head_++];
-            for (ClauseRef ref : occ_[falsified]) {
-                Lit unit = UNDEF_LIT;
-                for (Lit lit : clauses[ref]) {
-                    Val v = value(lit);
-                    if (v == VAL_TRUE) goto next_clause;  // satisfied
-                    if (v == VAL_UNASSIGNED) {
-                        if (unit != UNDEF_LIT) goto next_clause;  // two unassigned: not unit
-                        unit = lit;
-                    }
-                }
-                if (unit == UNDEF_LIT) return false;  // all literals false: conflict
-                assign(unit);
-            next_clause:;
-            }
-        }
-        return true;
-    }
+    /// Value of the literal (a single load): #VAL_TRUE, #VAL_FALSE or #VAL_UNASSIGNED.
+    Val value(Lit lit) const { return val_[lit]; }
 
-    /**
-     * @brief Assigns the literal true on the current level (without propagation).
-     * @return false if the literal is already false; true if it is (now) true
-     */
-    bool push(Lit lit) {
-        Val v = value(lit);
-        if (v != VAL_UNASSIGNED) return v == VAL_TRUE;
-        assign(lit);
-        return true;
-    }
+    /// Value of the variable.
+    Val value(Var var) const { return val_[Lit(var)]; }
 
-    /// Opens a new decision level.
-    void newLevel() { trail_lim_.push_back(static_cast<unsigned>(trail_.size())); }
+    /// Reason of an assigned variable; UNDEF for decisions and root facts pushed by the client.
+    ClauseRef reason(Var var) const { return vars_[var].reason; }
+
+    /// Level at which an assigned variable was assigned.
+    unsigned level(Var var) const { return vars_[var].level; }
+
+    /// True if the assigned literal is a decision (has no reason).
+    bool isDecision(Lit lit) const { return reason(lit.var()) == ClauseRef(); }
+
+    /// Current decision level (0 = root level).
+    unsigned level() const noexcept { return static_cast<unsigned>(lim_.size() - 1); }
+
+    /// Opens a new decision level. @pre the queue is empty
+    void newLevel() {
+        assert(head == trail_.size());
+        lim_.push_back(trail_.size());
+    }
 
     /**
      * @brief Undoes all assignments of the current decision level.
      * @return false (and does nothing) on the root level
      */
     bool backtrack() {
-        if (trail_lim_.size() <= 1) return false;
-        for (std::size_t i = trail_lim_.back(); i < trail_.size(); ++i) {
-            val_[trail_[i]] = VAL_UNASSIGNED;
-            val_[-trail_[i]] = VAL_UNASSIGNED;
-        }
-        trail_.resize(trail_lim_.back());
-        trail_lim_.pop_back();
-        head_ = trail_.size();
+        if (level() == 0) return false;
+        backtrackTo(level() - 1);
         return true;
     }
 
-    /// Value of the variable: #VAL_TRUE, #VAL_FALSE or #VAL_UNASSIGNED.
-    Val value(Var var) const { return val_[Lit(var)]; }
+    /**
+     * @brief Undoes all levels above the given one.
+     * @pre no literal above was assigned out of order at a level `<= level`
+     *      (use backtrackToRetaining() in that case; asserted)
+     */
+    void backtrackTo(unsigned level) {
+        if (level >= this->level()) return;
+        const std::size_t keep = lim_[level + 1];
+        for (std::size_t i = keep; i < trail_.size(); ++i) {
+            assert(vars_[trail_[i].var()].level > level);
+            unassign(trail_[i]);
+        }
+        trail_.resize(keep);
+        lim_.resize(level + 1);
+        head = keep;
+    }
 
-    /// Value of the literal: #VAL_TRUE, #VAL_FALSE or #VAL_UNASSIGNED.
-    Val value(Lit lit) const { return val_[lit]; }
+    /**
+     * @brief Undoes all levels above the given one, retaining literals that
+     * were assigned out of order at a level `<= level`.
+     *
+     * The retained literals stay on the trail in order and are queued for
+     * propagation again (chronological backtracking).
+     */
+    void backtrackToRetaining(unsigned level) {
+        if (level >= this->level()) return;
+        const std::size_t keep = lim_[level + 1];
+        std::size_t j = keep;
+        for (std::size_t i = keep; i < trail_.size(); ++i) {
+            Lit lit = trail_[i];
+            if (vars_[lit.var()].level > level) unassign(lit);
+            else trail_[j++] = lit;
+        }
+        trail_.resize(j);
+        lim_.resize(level + 1);
+        head = keep;
+    }
 
-    /// The i-th assigned literal.
-    Lit operator[](std::size_t i) const { return trail_[i]; }
+    /**
+     * @brief Pushes a decision (or a root fact on level 0).
+     * @pre on a non-root level, the level has not been propagated yet
+     * @return false if the literal is already false; true if it is (now) true
+     */
+    bool push(Lit lit) {
+        assert(level() == 0 || head == lim_.back());
+        Val v = value(lit);
+        if (v != VAL_UNASSIGNED) return v == VAL_TRUE;
+        assign(lit, ClauseRef());
+        return true;
+    }
 
-    /// Number of assigned literals.
+    /// Pushes decisions until one is already false. @return false in that case
+    bool push(std::span<const Lit> lits) {
+        for (Lit lit : lits) {
+            if (!push(lit)) return false;
+        }
+        return true;
+    }
+
+    /// Assigns the unassigned literal true on the current level (propagator interface).
+    void assign(Lit lit, ClauseRef reason) { assign(lit, reason, level()); }
+
+    /// Assigns the unassigned literal true at the given level, which may be below the current one.
+    void assign(Lit lit, ClauseRef reason, unsigned level) {
+        assert(value(lit) == VAL_UNASSIGNED && level <= this->level());
+        val_[lit] = VAL_TRUE;
+        val_[-lit] = VAL_FALSE;
+        vars_[lit.var()] = { reason, level };
+        trail_.push_back(lit);
+    }
+
+    const Lit* begin() const noexcept { return trail_.data(); }
+    const Lit* end() const noexcept { return trail_.data() + trail_.size(); }
     std::size_t size() const noexcept { return trail_.size(); }
+    Lit operator[](std::size_t i) const { return trail_[i]; }
 
     /// All assigned literals in assignment order.
     std::span<const Lit> literals() const noexcept { return trail_; }
 
-    /// Number of variables of the formula given to init().
-    unsigned nVars() const noexcept { return val_.nVars(); }
+    /// The trail segment opened at the given level (`level <= level()`).
+    std::span<const Lit> literals(unsigned level) const {
+        const std::size_t first = lim_[level];
+        const std::size_t last = level + 1 < lim_.size() ? lim_[level + 1] : trail_.size();
+        return { trail_.data() + first, last - first };
+    }
 
-    /// Current decision level (0 = root level).
-    unsigned level() const noexcept { return static_cast<unsigned>(trail_lim_.size() - 1); }
-
-    /// Trail position of the first literal of the given level (`level <= level()`).
-    std::size_t levelStart(unsigned level) const { return trail_lim_[level]; }
-
-    /// Prints the assigned literals in DIMACS notation on one line.
-    void print(std::ostream& out = std::cout) const {
+    /// Replaces the reasons of assigned variables after ClauseArena::compact().
+    void relocate(std::span<const ClauseArena::Relocation> relocation) {
         for (Lit lit : trail_) {
-            out << lit << " ";
+            ClauseRef& reason = vars_[lit.var()].reason;
+            if (reason != ClauseRef()) reason = relocated(relocation, reason);
         }
-        out << std::endl;
     }
 
-    /// True if every clause of the formula has a true literal.
-    bool satisfies(const CNFFormula& formula) const {
-        for (auto clause : formula) {
-            bool sat = false;
-            for (Lit lit : clause) {
-                if (value(lit) == VAL_TRUE) {
-                    sat = true;
-                    break;
-                }
-            }
-            if (!sat) return false;
-        }
-        return true;
-    }
+    /// First trail position not yet propagated; the propagation queue is `[head, size())`.
+    std::size_t head = 0;
 
  private:
-    /// Assigns the unassigned literal true on the current level.
-    void assign(Lit lit) {
-        val_[lit] = VAL_TRUE;
-        val_[-lit] = VAL_FALSE;
-        trail_.push_back(lit);
-    }
+    void unassign(Lit lit) { val_[lit] = val_[-lit] = VAL_UNASSIGNED; }
 
-    std::vector<Lit> trail_;                      ///< assigned literals in assignment order
-    std::vector<unsigned> trail_lim_ { 0 };       ///< trail position where each level starts
-    LitMap<Val> val_;                             ///< value per literal
-    LitMap<std::vector<ClauseRef>> occ_;          ///< occurrence list per literal
-    const ClauseArena* clauses_ = nullptr;        ///< clauses of the formula given to init()
-    std::size_t head_ = 0;                        ///< first trail position not yet propagated
+    struct VarInfo {
+        ClauseRef reason;
+        uint32_t level = 0;
+    };
+
+    std::vector<Lit> trail_;               ///< assigned literals in assignment order
+    std::vector<std::size_t> lim_ { 0 };   ///< trail position where each level starts
+    LitMap<Val> val_;                      ///< value per literal
+    std::vector<VarInfo> vars_;            ///< reason and level per variable
 };
+
+/// Prints the assigned literals in DIMACS notation, each followed by a space.
+inline std::ostream& operator<<(std::ostream& stream, const Trail& trail) {
+    return stream << trail.literals();
+}
+
+/// True if every clause of the arena has a true literal.
+inline bool satisfies(const Trail& trail, const ClauseArena& clauses) {
+    for (auto clause : clauses) {
+        if (std::none_of(clause.begin(), clause.end(), [&](Lit lit) { return trail.value(lit) == VAL_TRUE; })) {
+            return false;
+        }
+    }
+    return true;
+}
 
 }  // namespace propan

@@ -1,220 +1,159 @@
 #include <doctest/doctest.h>
 
-#include <algorithm>
-#include <initializer_list>
+#include <sstream>
 #include <vector>
 
+#include "propan/clause_arena.h"
 #include "propan/trail.h"
 #include "test_util.h"
 
 using namespace propan;
+using test::lits;
 
 namespace {
 
-Lit L(int d) { return Lit(std::abs(d), d < 0); }
-
-CNFFormula cnf(std::initializer_list<std::initializer_list<int>> clauses) {
-    CNFFormula f;
-    for (auto& c : clauses) {
-        Cl cl;
-        for (int d : c) cl.push_back(L(d));
-        f.addClause(cl);
-    }
-    return f;
-}
-
-/// Literal is assigned true on the trail.
-bool isTrue(Trail& t, int d) {
-    Lit l = L(d);
-    return t.value(l) == VAL_TRUE;
-}
-
 /// Trail invariants: every trail literal is true, no variable occurs twice,
-/// every assigned variable is on the trail, level limits are monotone.
+/// every assigned variable is on the trail, levels partition the trail, a
+/// level's segment contains no literal of a higher level, and decisions form
+/// a prefix of every non-root level.
 void checkInvariants(const Trail& t) {
     std::vector<int> seen(t.nVars() + 1, 0);
-    for (size_t i = 0; i < t.size(); ++i) {
-        Lit l = t[i];
+    for (Lit l : t) {
         CHECK(t.value(l) == VAL_TRUE);
         CHECK(seen[l.var()]++ == 0);
     }
     for (unsigned v = 1; v <= t.nVars(); ++v) {
         CHECK((t.value(Var(v)) != VAL_UNASSIGNED) == (seen[v] == 1));
     }
-    CHECK(t.levelStart(0) == 0);
-    for (unsigned l = 1; l <= t.level(); ++l) {
-        CHECK(t.levelStart(l - 1) <= t.levelStart(l));
+    const Lit* expected = t.begin();
+    for (unsigned l = 0; l <= t.level(); ++l) {
+        auto segment = t.literals(l);
+        CHECK(segment.data() == expected);
+        expected += segment.size();
+        bool decisions = l > 0;
+        for (Lit lit : segment) {
+            CHECK(t.level(lit.var()) <= l);
+            if (!t.isDecision(lit)) decisions = false;
+            else CHECK((l == 0 || decisions));
+        }
     }
-    CHECK(t.levelStart(t.level()) <= t.size());
+    CHECK(expected == t.end());
 }
 
 }  // namespace
 
 TEST_SUITE("trail") {
 
-TEST_CASE("init without units leaves everything unassigned") {
-    CNFFormula f = cnf({ { 1, 2 }, { -1, 3 } });
-    Trail t;
-    CHECK(t.init(f));
+TEST_CASE("a fresh trail is empty on the root level") {
+    Trail t(3);
+    CHECK(t.nVars() == 3);
     CHECK(t.size() == 0);
-    for (unsigned v = 1; v <= f.nVars(); ++v) CHECK(t.value(Var(v)) == VAL_UNASSIGNED);
+    CHECK(t.level() == 0);
+    CHECK(t.head == 0);
+    for (unsigned v = 1; v <= 3; ++v) CHECK(t.value(Var(v)) == VAL_UNASSIGNED);
+    CHECK_FALSE(t.backtrack());
     checkInvariants(t);
 }
 
-TEST_CASE("init propagates unit clauses to fixpoint") {
-    CNFFormula f = cnf({ { 1 }, { -1, 2 }, { -2, 3 }, { -3, -4 } });
-    Trail t;
-    REQUIRE(t.init(f));
-    CHECK(t.size() == 4);
-    for (int d : { 1, 2, 3, -4 }) CHECK(isTrue(t, d));
-    checkInvariants(t);
-}
-
-TEST_CASE("init detects contradicting units") {
-    Trail t;
-    CNFFormula f = cnf({ { 1 }, { -1 } });
-    CHECK_FALSE(t.init(f));
-}
-
-TEST_CASE("init detects conflict by propagation of units") {
-    Trail t;
-    CNFFormula f = cnf({ { 1 }, { -1, 2 }, { -1, -2 } });
-    CHECK_FALSE(t.init(f));
-}
-
-TEST_CASE("init detects the empty clause") {
-    Trail t;
-    CNFFormula f = cnf({ { 1, 2 }, {} });
-    CHECK_FALSE(t.init(f));
-}
-
-TEST_CASE("re-init with another formula starts from a clean state") {
-    Trail t;
-    CNFFormula f = cnf({ { 1 }, { 2 }, { 3 } });
-    REQUIRE(t.init(f));
-    CNFFormula g = cnf({ { 1 }, { -1, 2 } });
-    REQUIRE(t.init(g));
-    CHECK(t.size() == 2);
-    CHECK(isTrue(t, 2));
+TEST_CASE("resize forgets assignments and levels") {
+    Trail t(2);
+    t.newLevel();
+    t.push(Lit(1));
+    t.resize(4);
+    CHECK(t.nVars() == 4);
+    CHECK(t.size() == 0);
+    CHECK(t.level() == 0);
+    CHECK(t.value(Var(1)) == VAL_UNASSIGNED);
+    CHECK(t.value(Var(4)) == VAL_UNASSIGNED);
 }
 
 TEST_CASE("push assigns, accepts repeated and rejects contradicting literals") {
-    CNFFormula f = cnf({ { 1, 2, 3 } });
-    Trail t;
-    REQUIRE(t.init(f));
-    CHECK(t.push(L(1)));
-    CHECK(isTrue(t, 1));
+    Trail t(3);
+    CHECK(t.push(Lit(1)));
+    CHECK(t.value(Lit(1)) == VAL_TRUE);
     CHECK(t.size() == 1);
-    CHECK(t.push(L(1)));
+    CHECK(t.push(Lit(1)));
     CHECK(t.size() == 1);
-    CHECK_FALSE(t.push(L(-1)));
+    CHECK_FALSE(t.push(Lit(-1)));
     CHECK(t.size() == 1);
-    CHECK(isTrue(t, 1));
+    CHECK(t.value(Lit(1)) == VAL_TRUE);
+    CHECK(t.isDecision(Lit(1)));
+    CHECK(t.reason(Var(1)) == ClauseRef());
+    CHECK(t.level(Var(1)) == 0);
     checkInvariants(t);
 }
 
-TEST_CASE("value of a negative literal is the negated value of its variable") {
-    CNFFormula f = cnf({ { 1, 2, 3 } });
-    Trail t;
-    REQUIRE(t.init(f));
-    CHECK(t.value(L(1)) == VAL_UNASSIGNED);
-    CHECK(t.value(L(-1)) == VAL_UNASSIGNED);
-    REQUIRE(t.push(L(1)));
-    REQUIRE(t.push(L(-2)));
+TEST_CASE("push of a span stops at the first false literal") {
+    Trail t(4);
+    t.newLevel();
+    CHECK(t.push(lits({ 1, -2 })));
+    CHECK(t.size() == 2);
+    CHECK_FALSE(t.push(lits({ 3, 2, 4 })));
+    CHECK(t.size() == 3);
+    CHECK(t.value(Lit(3)) == VAL_TRUE);
+    CHECK(t.value(Var(4)) == VAL_UNASSIGNED);
+    CHECK(t.literals(1).size() == 3);
+    for (Lit l : t.literals(1)) CHECK(t.isDecision(l));
+    checkInvariants(t);
+}
+
+TEST_CASE("value of a literal is the single-load per-literal value") {
+    Trail t(3);
+    CHECK(t.value(Lit(1)) == VAL_UNASSIGNED);
+    CHECK(t.value(Lit(-1)) == VAL_UNASSIGNED);
+    REQUIRE(t.push(Lit(1)));
+    REQUIRE(t.push(Lit(-2)));
     CHECK(t.value(Var(1)) == VAL_TRUE);
     CHECK(t.value(Var(2)) == VAL_FALSE);
-    CHECK(t.value(L(1)) == VAL_TRUE);
-    CHECK(t.value(L(-1)) == VAL_FALSE);
-    CHECK(t.value(L(2)) == VAL_FALSE);
-    CHECK(t.value(L(-2)) == VAL_TRUE);
-    CHECK(t.value(L(3)) == VAL_UNASSIGNED);
+    CHECK(t.value(Lit(1)) == VAL_TRUE);
+    CHECK(t.value(Lit(-1)) == VAL_FALSE);
+    CHECK(t.value(Lit(2)) == VAL_FALSE);
+    CHECK(t.value(Lit(-2)) == VAL_TRUE);
+    CHECK(t.value(Lit(3)) == VAL_UNASSIGNED);
 }
 
-TEST_CASE("propagate follows implication chains") {
-    CNFFormula f = cnf({ { -1, 2 }, { -2, 3 }, { -3, 4 }, { -4, 5 } });
-    Trail t;
-    REQUIRE(t.init(f));
+TEST_CASE("assign records reason and level; the queue holds unpropagated literals") {
+    Trail t(5);
+    t.push(Lit(1));  // root fact
+    t.head = 1;      // "propagated"
     t.newLevel();
-    t.push(L(1));
-    CHECK(t.propagate());
-    CHECK(t.size() == 5);
-    for (int d : { 1, 2, 3, 4, 5 }) CHECK(isTrue(t, d));
-    CHECK(t[0] == L(1));
+    t.push(Lit(2));
+    t.assign(Lit(3), ClauseRef(7));
+    CHECK(t.head == 1);
+    CHECK(t.reason(Var(3)) == ClauseRef(7));
+    CHECK(t.level(Var(3)) == 1);
+    CHECK_FALSE(t.isDecision(Lit(3)));
+    CHECK(t.isDecision(Lit(2)));
+    CHECK(t.level(Var(1)) == 0);
+    t.head = t.size();  // "propagated"
+    t.newLevel();
+    t.push(Lit(4));
+    CHECK(t.level() == 2);
+    CHECK(t.literals(0).size() == 1);
+    CHECK(t.literals(1).size() == 2);
+    CHECK(t.literals(2).size() == 1);
+    CHECK(t.literals(1)[1] == Lit(3));
     checkInvariants(t);
 }
 
-TEST_CASE("propagate does not fire satisfied or non-unit clauses") {
-    CNFFormula f = cnf({ { -1, 2, 3 }, { -1, 4, -5 } });
-    Trail t;
-    REQUIRE(t.init(f));
-    t.push(L(1));
-    CHECK(t.propagate());
-    CHECK(t.size() == 1);
-    t.push(L(5));
-    CHECK(t.propagate());
-    CHECK(isTrue(t, 4));
-    t.push(L(-3));
-    CHECK(t.propagate());
-    CHECK(isTrue(t, 2));
-    checkInvariants(t);
-}
-
-TEST_CASE("propagate ignores clauses satisfied before becoming unit") {
-    CNFFormula f = cnf({ { -1, -2, 3 } });
-    Trail t;
-    REQUIRE(t.init(f));
-    t.push(L(3));
-    t.push(L(1));
-    t.push(L(2));
-    CHECK(t.propagate());
-    CHECK(t.size() == 3);
-}
-
-TEST_CASE("propagate detects conflicts") {
-    SUBCASE("two binary clauses") {
-        CNFFormula f = cnf({ { -1, 2 }, { -1, -2 } });
-        Trail t;
-        REQUIRE(t.init(f));
-        t.push(L(1));
-        CHECK_FALSE(t.propagate());
-    }
-    SUBCASE("all literals of a clause falsified by decisions") {
-        CNFFormula f = cnf({ { 1, 2, 3 } });
-        Trail t;
-        REQUIRE(t.init(f));
-        t.push(L(-1));
-        t.push(L(-2));
-        t.push(L(-3));
-        CHECK_FALSE(t.propagate());
-    }
-    SUBCASE("longer chain") {
-        CNFFormula f = cnf({ { -1, 2 }, { -2, 3 }, { -3, -1 } });
-        Trail t;
-        REQUIRE(t.init(f));
-        t.push(L(1));
-        CHECK_FALSE(t.propagate());
-    }
-}
-
-TEST_CASE("backtrack undoes exactly the last level") {
-    CNFFormula f = cnf({ { 1 }, { -2, 3 }, { -4, 5 } });
-    Trail t;
-    REQUIRE(t.init(f));
-    REQUIRE(t.size() == 1);
-
+TEST_CASE("backtrack undoes exactly the last level and resets the queue") {
+    Trail t(5);
+    t.push(Lit(1));
+    t.head = 1;
     t.newLevel();
-    t.push(L(2));
-    REQUIRE(t.propagate());
+    t.push(Lit(2));
+    t.assign(Lit(3), ClauseRef(0));
+    t.head = 3;
     t.newLevel();
-    t.push(L(4));
-    REQUIRE(t.propagate());
-    CHECK(t.size() == 5);
+    t.push(Lit(4));
+    t.assign(Lit(5), ClauseRef(3));
+    t.head = 4;  // conflict in the middle of propagation
 
     CHECK(t.backtrack());
+    CHECK(t.level() == 1);
     CHECK(t.size() == 3);
-    CHECK(isTrue(t, 1));
-    CHECK(isTrue(t, 2));
-    CHECK(isTrue(t, 3));
+    CHECK(t.head == 3);
+    for (int d : { 1, 2, 3 }) CHECK(t.value(Lit(d)) == VAL_TRUE);
     CHECK(t.value(Var(4)) == VAL_UNASSIGNED);
     CHECK(t.value(Var(5)) == VAL_UNASSIGNED);
     checkInvariants(t);
@@ -222,88 +161,132 @@ TEST_CASE("backtrack undoes exactly the last level") {
     CHECK(t.backtrack());
     CHECK(t.size() == 1);
     CHECK(t.value(Var(2)) == VAL_UNASSIGNED);
-    checkInvariants(t);
-}
-
-TEST_CASE("backtrack after conflict allows propagating the other branch") {
-    CNFFormula f = cnf({ { -1, 2 }, { -1, -2 }, { 1, 3 } });
-    Trail t;
-    REQUIRE(t.init(f));
-    t.newLevel();
-    t.push(L(1));
-    REQUIRE_FALSE(t.propagate());
-    REQUIRE(t.backtrack());
-    CHECK(t.size() == 0);
-    t.newLevel();
-    t.push(L(-1));
-    CHECK(t.propagate());
-    CHECK(isTrue(t, 3));
-    checkInvariants(t);
-}
-
-TEST_CASE("propagation after backtrack re-propagates nothing stale") {
-    CNFFormula f = cnf({ { -1, 2 }, { -3, 4 } });
-    Trail t;
-    REQUIRE(t.init(f));
-    t.newLevel();
-    t.push(L(1));
-    REQUIRE(t.propagate());
-    t.newLevel();
-    t.push(L(3));
-    REQUIRE(t.propagate());
-    REQUIRE(t.backtrack());
-    t.newLevel();
-    t.push(L(-4));
-    CHECK(t.propagate());
-    CHECK(isTrue(t, -3));
-    CHECK(t.size() == 4);
-    checkInvariants(t);
-}
-
-TEST_CASE("several decisions on one level are undone together") {
-    CNFFormula f = cnf({ { -1, 2 }, { -3, 4 } });
-    Trail t;
-    REQUIRE(t.init(f));
-    t.newLevel();
-    t.push(L(1));
-    t.push(L(3));
-    REQUIRE(t.propagate());
-    CHECK(t.size() == 4);
-    REQUIRE(t.backtrack());
-    CHECK(t.size() == 0);
-    checkInvariants(t);
-}
-
-TEST_CASE("backtrack on level 0 keeps root-level units and returns false") {
-    CNFFormula f = cnf({ { 1 }, { -1, 2 } });
-    Trail t;
-    REQUIRE(t.init(f));
     CHECK_FALSE(t.backtrack());
-    CHECK(t.size() == 2);
-    CHECK(isTrue(t, 2));
-}
-
-TEST_CASE("satisfies checks the formula against the assignment") {
-    CNFFormula f = cnf({ { 1, 2 }, { -1, 3 } });
-    Trail t;
-    REQUIRE(t.init(f));
-    CHECK_FALSE(t.satisfies(f));
-    t.push(L(1));
-    CHECK_FALSE(t.satisfies(f));
-    REQUIRE(t.propagate());
-    CHECK(t.satisfies(f));
-}
-
-TEST_CASE("solves the test formula by decisions and propagation") {
-    CNFFormula f(test::data("sat_small.cnf").c_str());
-    Trail t;
-    REQUIRE(t.init(f));
-    t.newLevel();
-    t.push(L(1));
-    REQUIRE(t.propagate());
-    CHECK(t.size() == 4);
-    CHECK(t.satisfies(f));
+    CHECK(t.size() == 1);
     checkInvariants(t);
+}
+
+TEST_CASE("backtrackTo undoes several levels at once and ignores higher targets") {
+    Trail t(6);
+    for (int d = 1; d <= 5; ++d) {
+        t.newLevel();
+        t.push(Lit(d));
+        t.head = t.size();
+    }
+    CHECK(t.level() == 5);
+    t.backtrackTo(7);
+    CHECK(t.level() == 5);
+    t.backtrackTo(2);
+    CHECK(t.level() == 2);
+    CHECK(t.size() == 2);
+    CHECK(t.value(Lit(2)) == VAL_TRUE);
+    CHECK(t.value(Var(3)) == VAL_UNASSIGNED);
+    t.backtrackTo(0);
+    CHECK(t.level() == 0);
+    CHECK(t.size() == 0);
+    checkInvariants(t);
+}
+
+TEST_CASE("backtrackToRetaining keeps out-of-order assignments and queues them again") {
+    Trail t(6);
+    t.newLevel();
+    t.push(Lit(1));
+    t.head = 1;
+    t.newLevel();
+    t.push(Lit(2));
+    t.assign(Lit(3), ClauseRef(0), 1);  // implied by level 1 only, assigned late
+    t.assign(Lit(4), ClauseRef(5));
+    t.assign(Lit(5), ClauseRef(9), 0);  // a late root-level unit
+    t.head = 5;
+    checkInvariants(t);
+
+    t.backtrackToRetaining(1);
+    CHECK(t.level() == 1);
+    CHECK(t.size() == 3);
+    CHECK(t.literals(1).size() == 3);
+    CHECK(t[0] == Lit(1));
+    CHECK(t[1] == Lit(3));
+    CHECK(t[2] == Lit(5));
+    CHECK(t.value(Var(2)) == VAL_UNASSIGNED);
+    CHECK(t.value(Var(4)) == VAL_UNASSIGNED);
+    CHECK(t.value(Lit(3)) == VAL_TRUE);
+    CHECK(t.value(Lit(5)) == VAL_TRUE);
+    CHECK(t.level(Var(3)) == 1);
+    CHECK(t.level(Var(5)) == 0);
+    CHECK(t.head == 1);  // retained literals must be propagated again
+    checkInvariants(t);
+
+    t.head = t.size();
+    t.backtrackToRetaining(0);
+    CHECK(t.level() == 0);
+    CHECK(t.size() == 1);
+    CHECK(t[0] == Lit(5));
+    CHECK(t.head == 0);
+    checkInvariants(t);
+}
+
+TEST_CASE("backtrackToRetaining equals backtrackTo without out-of-order literals") {
+    Trail t(4);
+    t.newLevel();
+    t.push(Lit(1));
+    t.assign(Lit(2), ClauseRef(0));
+    t.head = 2;
+    t.newLevel();
+    t.push(Lit(3));
+    t.assign(Lit(4), ClauseRef(1));
+    t.head = 3;
+    t.backtrackToRetaining(1);
+    CHECK(t.level() == 1);
+    CHECK(t.size() == 2);
+    CHECK(t.head == 2);
+    CHECK(t.value(Var(3)) == VAL_UNASSIGNED);
+    CHECK(t.value(Var(4)) == VAL_UNASSIGNED);
+    checkInvariants(t);
+}
+
+TEST_CASE("relocate maps reasons through the arena's relocation table") {
+    ClauseArena a;
+    ClauseRef dead = a.add(lits({ 9 }));
+    ClauseRef c1 = a.add(lits({ -1, 2 }));
+    ClauseRef c2 = a.add(lits({ -2, 3 }));
+    Trail t(3);
+    t.newLevel();
+    t.push(Lit(1));
+    t.assign(Lit(2), c1);
+    t.assign(Lit(3), c2);
+    a.erase(dead);
+    const auto relocation = a.compact();
+    REQUIRE(relocation.size() == 2);
+    t.relocate(relocation);
+    CHECK(t.reason(Var(1)) == ClauseRef());
+    CHECK(t.reason(Var(2)) == a.ref(ClauseId(1)));
+    CHECK(t.reason(Var(3)) == a.ref(ClauseId(2)));
+    CHECK(test::asCl(a[t.reason(Var(3))]) == lits({ -2, 3 }));
+}
+
+TEST_CASE("satisfies checks all clauses against the assignment") {
+    ClauseArena a;
+    a.add(lits({ 1, 2 }));
+    a.add(lits({ -1, 3 }));
+    Trail t(3);
+    CHECK_FALSE(satisfies(t, a));
+    t.push(Lit(1));
+    CHECK_FALSE(satisfies(t, a));
+    t.push(Lit(3));
+    CHECK(satisfies(t, a));
+    ClauseArena empty;
+    CHECK(satisfies(t, empty));
+    a.add(lits({}));
+    CHECK_FALSE(satisfies(t, a));
+}
+
+TEST_CASE("printing") {
+    Trail t(3);
+    t.push(Lit(1));
+    t.push(Lit(-3));
+    std::ostringstream os;
+    os << t;
+    CHECK(os.str() == "1 -3 ");
 }
 
 }  // TEST_SUITE
