@@ -35,8 +35,8 @@ double calculate_median(std::vector<int>& data) {
 
 std::vector<Lit> get_permutation(size_t nVars, size_t seed) {
     std::vector<Lit> perm(nVars);
-    for (int i = 0; i < nVars; i++) {
-        perm[i] = Lit(i+1, false);
+    for (size_t i = 0; i < nVars; i++) {
+        perm[i] = Lit(static_cast<int>(i + 1));
     }
 
     std::mt19937 g(seed);
@@ -176,8 +176,6 @@ int main(int argc, char **argv) {
         std::cout << "s UNKNOWN" << std::endl;
         std::cout << "c GAVE UP" << std::endl;
     }
-
-    double fraction = (double)formula.nVars() / trail.size();
 
     std::vector<int> differences;
     for (unsigned i = 0; i < trail.level(); ++i) {

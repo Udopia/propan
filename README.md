@@ -1,6 +1,8 @@
 # propan
 
-Boolean Constraint Propagation Libary
+[![CI](https://github.com/Udopia/propan/actions/workflows/ci.yml/badge.svg)](https://github.com/Udopia/propan/actions/workflows/ci.yml)
+
+Boolean Constraint Propagation Library
 
 ## Clause storage
 
@@ -115,3 +117,15 @@ cmake -S . -B build
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
+
+`-DPROPAN_WERROR=ON` treats warnings as errors, `-DPROPAN_SANITIZERS=ON` builds
+with AddressSanitizer and UndefinedBehaviorSanitizer. Integration tests carry
+the label `integration` (`ctest -L integration` / `-LE integration`).
+
+## Continuous integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) builds and tests on
+every push to `main` and every pull request: GCC and Clang in Release with
+`-Werror` and in Debug with sanitizers on Ubuntu, plus Clang on macOS. Release
+jobs also run the integration tests; the GCC release job attaches the
+propagator benchmark table to the job summary.

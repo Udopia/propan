@@ -14,6 +14,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(PROPAN_BUILD_APPS "Build applications (slursat, ...)" ${PROJECT_IS_TOP_LEVEL})
 option(PROPAN_BUILD_TESTS "Build unit and application tests" ${PROJECT_IS_TOP_LEVEL})
+option(PROPAN_WERROR "Treat compiler warnings as errors" OFF)
+option(PROPAN_SANITIZERS "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 
 find_package(LibArchive REQUIRED)
 
@@ -28,7 +30,13 @@ target_link_libraries(propan INTERFACE LibArchive::LibArchive)
 # Warning flags for targets built within this project (not propagated to consumers)
 add_library(propan_warnings INTERFACE)
 target_compile_options(propan_warnings INTERFACE
-    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra>)
+    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra>
+    $<$<AND:$<BOOL:${PROPAN_WERROR}>,$<CXX_COMPILER_ID:GNU,Clang,AppleClang>>:-Werror>)
+
+if(PROPAN_SANITIZERS)
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address,undefined)
+endif()
 
 if(PROPAN_BUILD_APPS)
     add_subdirectory(apps)
