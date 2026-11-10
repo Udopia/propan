@@ -17,7 +17,7 @@ namespace test {
 /// Clause from DIMACS literals.
 inline propan::Cl lits(std::initializer_list<int> dimacs) {
     propan::Cl c;
-    for (int d : dimacs) c.push_back(propan::Lit::fromDimacs(d));
+    for (int d : dimacs) c.push_back(propan::Lit(d));
     return c;
 }
 

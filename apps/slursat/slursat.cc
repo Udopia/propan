@@ -55,7 +55,7 @@ bool slurpk(std::vector<Lit> lits, Trail& trail, unsigned k) {
                     ++j;
                 }
                 if (i + j >= lits.size()) break;
-                Lit lit = (bv & (1ULL << c)) ? lits[i + j] : ~lits[i + j];
+                Lit lit = (bv & (1ULL << c)) ? lits[i + j] : -lits[i + j];
                 trail.push(lit);
                 c++;
                 conflict = !trail.propagate();
@@ -84,7 +84,7 @@ bool slurk(std::vector<Lit> lits, Trail& trail, unsigned k) {
                     ++j;
                 }
                 if (i + j >= lits.size()) break;
-                Lit lit = (bv & (1ULL << c)) ? lits[i + j] : ~lits[i + j];
+                Lit lit = (bv & (1ULL << c)) ? lits[i + j] : -lits[i + j];
                 trail.push(lit);
                 c++;
             }
@@ -105,7 +105,7 @@ bool slursat(std::vector<Lit> lits, Trail& trail) {
             if (!trail.propagate()) {
                 trail.backtrack();
                 trail.newLevel();
-                trail.push(~lit);
+                trail.push(-lit);
                 if (!trail.propagate()) {
                     return false;
                 }

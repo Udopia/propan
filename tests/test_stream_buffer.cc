@@ -1,9 +1,13 @@
 #include <doctest/doctest.h>
 
+#include <cstddef>
+#include <cstdio>
 #include <fstream>
 #include <iterator>
 #include <limits>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "propan/stream_buffer.h"
@@ -20,7 +24,7 @@ std::vector<int> readAll(const char* filename) {
     StreamBuffer in(filename);
     std::vector<int> result;
     int x;
-    while (in.readInteger(&x)) result.push_back(x);
+    while (in.read(x)) result.push_back(x);
     return result;
 }
 
@@ -41,7 +45,7 @@ TEST_CASE("handles CRLF line endings") {
     REQUIRE(in.skipLine());
     std::vector<int> v;
     int x;
-    while (in.readInteger(&x)) v.push_back(x);
+    while (in.read(x)) v.push_back(x);
     CHECK(v == std::vector<int> { 1, 2, 0, 3, 0 });
     CHECK(in.eof());
 }
@@ -58,7 +62,7 @@ TEST_CASE("last token without trailing newline is read after skipLine") {
     REQUIRE(in.skipLine());
     std::vector<int> v;
     int x;
-    while (in.readInteger(&x)) v.push_back(x);
+    while (in.read(x)) v.push_back(x);
     CHECK(v == std::vector<int> { 1, 2, 0, 3, 0 });
 }
 
@@ -69,7 +73,7 @@ TEST_CASE("skipLine skips comments and returns false at eof") {
     REQUIRE(in.skipLine());
     REQUIRE(in.skipLine());
     int x;
-    REQUIRE(in.readInteger(&x));
+    REQUIRE(in.read(x));
     CHECK(x == 7);
     CHECK_FALSE(in.skipWhitespace());
     CHECK(in.eof());
@@ -82,7 +86,7 @@ TEST_CASE("skipLine over a comment longer than the internal buffer") {
     REQUIRE(in.skipWhitespace());
     REQUIRE(in.skipLine());
     int x;
-    REQUIRE(in.readInteger(&x));
+    REQUIRE(in.read(x));
     CHECK(x == 5);
 }
 
@@ -98,43 +102,101 @@ TEST_CASE("integers crossing the internal buffer boundary are read correctly") {
     CHECK(readAll(f.c_str()) == expected);
 }
 
-TEST_CASE("token longer than the internal buffer throws") {
-    TempFile f(std::string(20000, '1') + " 0\n");
-    CHECK_THROWS_AS(StreamBuffer(f.c_str()), ParserException);
+TEST_CASE("token longer than the internal buffer throws when it is read") {
+    TempFile f(std::string(StreamBuffer::BUFFER_SIZE + 1, '1') + " 0\n");
+    StreamBuffer in(f.c_str());  // opening succeeds, the token is only inspected on read
+    std::string s;
+    CHECK_THROWS_AS(in.readNumber(s), ParserException);
+
+    TempFile g(std::string(StreamBuffer::BUFFER_SIZE, '1') + " 0\n");
+    StreamBuffer in2(g.c_str());
+    CHECK_THROWS_AS(in2.readNumber(s), ParserException);  // no room for the terminating whitespace
 }
 
-TEST_CASE("readInteger rejects values outside int32 range") {
+TEST_CASE("token of almost the buffer size is read, also when it starts late in a chunk") {
+    const std::string digits(StreamBuffer::BUFFER_SIZE - 1, '7');
+    for (std::size_t prefix : { std::size_t(0), std::size_t(1), StreamBuffer::BUFFER_SIZE / 2, StreamBuffer::BUFFER_SIZE - 2 }) {
+        CAPTURE(prefix);
+        TempFile f(std::string(prefix, ' ') + digits + " 0");
+        StreamBuffer in(f.c_str());
+        std::string s;
+        REQUIRE(in.readNumber(s));
+        CHECK(s == digits);
+        int x;
+        REQUIRE(in.read(x));
+        CHECK(x == 0);
+        CHECK_FALSE(in.read(x));
+        CHECK(in.eof());
+    }
+}
+
+TEST_CASE("read<int> rejects INT32_MIN and a bare sign") {
+    int x;
+    TempFile f("-2147483648\n");
+    CHECK_THROWS_AS(StreamBuffer(f.c_str()).read(x), ParserException);
+    TempFile g("- 1\n");
+    CHECK_THROWS_AS(StreamBuffer(g.c_str()).read(x), ParserException);
+    TempFile h("+\n");
+    CHECK_THROWS_AS(StreamBuffer(h.c_str()).read(x), ParserException);
+}
+
+TEST_CASE("read<uint64_t> rejects negative numbers") {
+    TempFile f("-1\n");
+    uint64_t x;
+    CHECK_THROWS_AS(StreamBuffer(f.c_str()).read(x), ParserException);
+}
+
+TEST_CASE("read stops at the first non-digit and the remainder is reported on the next read") {
+    TempFile f("12x 3");
+    StreamBuffer in(f.c_str());
+    int x;
+    REQUIRE(in.read(x));
+    CHECK(x == 12);
+    CHECK(*in == 'x');
+    CHECK_THROWS_AS(in.read(x), ParserException);
+}
+
+TEST_CASE("read leaves the output untouched when the end of the file is reached") {
+    TempFile f("  \n\t");
+    StreamBuffer in(f.c_str());
+    int x = 42;
+    CHECK_FALSE(in.read(x));
+    CHECK(x == 42);
+    CHECK(in.eof());
+}
+
+TEST_CASE("read<int> accepts the symmetric int32 range and rejects values outside") {
     TempFile f("2147483647 -2147483647 2147483648\n");
     StreamBuffer in(f.c_str());
     int x;
-    REQUIRE(in.readInteger(&x));
+    REQUIRE(in.read(x));
     CHECK(x == std::numeric_limits<int32_t>::max());
-    REQUIRE(in.readInteger(&x));
+    REQUIRE(in.read(x));
     CHECK(x == -std::numeric_limits<int32_t>::max());
-    CHECK_THROWS_AS(in.readInteger(&x), ParserException);
+    CHECK_THROWS_AS(in.read(x), ParserException);
 }
 
-TEST_CASE("readInteger rejects non-numeric input") {
+TEST_CASE("read<int> rejects non-numeric input") {
     TempFile f("1 x 0\n");
     StreamBuffer in(f.c_str());
     int x;
-    REQUIRE(in.readInteger(&x));
-    CHECK_THROWS_AS(in.readInteger(&x), ParserException);
+    REQUIRE(in.read(x));
+    CHECK_THROWS_AS(in.read(x), ParserException);
 }
 
-TEST_CASE("readUInt64 reads full 64-bit range") {
+TEST_CASE("read<uint64_t> reads full 64-bit range") {
     TempFile f("18446744073709551615 0\n");
     StreamBuffer in(f.c_str());
     uint64_t x = 0;
-    REQUIRE(in.readUInt64(&x));
+    REQUIRE(in.read(x));
     CHECK(x == std::numeric_limits<uint64_t>::max());
 }
 
-TEST_CASE("readUInt64 rejects values beyond 64 bit") {
+TEST_CASE("read<uint64_t> rejects values beyond 64 bit") {
     TempFile f("18446744073709551616\n");
     StreamBuffer in(f.c_str());
     uint64_t x = 0;
-    CHECK_THROWS_AS(in.readUInt64(&x), ParserException);
+    CHECK_THROWS_AS(in.read(x), ParserException);
 }
 
 TEST_CASE("skipString matches prefix and throws on mismatch") {
@@ -142,22 +204,51 @@ TEST_CASE("skipString matches prefix and throws on mismatch") {
     StreamBuffer in(f.c_str());
     CHECK(in.skipString("p cnf"));
     int x;
-    REQUIRE(in.readInteger(&x));
+    REQUIRE(in.read(x));
     CHECK(x == 3);
 
     TempFile g("p wcnf\n");
     StreamBuffer in2(g.c_str());
     CHECK_THROWS_AS(in2.skipString("p cnf"), ParserException);
+
+    TempFile h("p cn");  // file ends inside the string
+    StreamBuffer in3(h.c_str());
+    CHECK_THROWS_AS(in3.skipString("p cnf"), ParserException);
+
+    TempFile k("p cnf");  // file ends right after the string
+    StreamBuffer in4(k.c_str());
+    CHECK_FALSE(in4.skipString("p cnf"));
+    CHECK(in4.eof());
 }
 
-TEST_CASE("readNumber returns digits as string") {
-    TempFile f("-123 +45\n");
+TEST_CASE("readNumber returns digits as string, keeping '-' and leading zeros") {
+    TempFile f("-123 +45 007 340282366920938463463374607431768211456 9x\n");
     StreamBuffer in(f.c_str());
     std::string s;
-    REQUIRE(in.readNumber(&s));
+    REQUIRE(in.readNumber(s));
     CHECK(s == "-123");
-    REQUIRE(in.readNumber(&s));
+    REQUIRE(in.readNumber(s));
     CHECK(s == "45");
+    REQUIRE(in.readNumber(s));
+    CHECK(s == "007");
+    REQUIRE(in.readNumber(s));
+    CHECK(s == "340282366920938463463374607431768211456");  // 2^128, beyond any integer type
+    REQUIRE(in.readNumber(s));
+    CHECK(s == "9");
+    CHECK(*in == 'x');
+    CHECK_THROWS_AS(in.readNumber(s), ParserException);
+    CHECK_FALSE(StreamBuffer(TempFile("\n").c_str()).readNumber(s));
+}
+
+TEST_CASE("skipNumber skips signed numbers and rejects other tokens") {
+    TempFile f("1 -2 +3 x");
+    StreamBuffer in(f.c_str());
+    REQUIRE(in.skipNumber());
+    REQUIRE(in.skipNumber());
+    REQUIRE(in.skipNumber());
+    CHECK(*in == ' ');
+    CHECK_THROWS_AS(in.skipNumber(), ParserException);
+    CHECK_FALSE(StreamBuffer(TempFile("").c_str()).skipNumber());
 }
 
 TEST_CASE("readClause skips header and comments") {
@@ -165,10 +256,39 @@ TEST_CASE("readClause skips header and comments") {
     StreamBuffer in(f.c_str());
     Cl c;
     REQUIRE(in.readClause(c));
-    CHECK(c == Cl { Lit(1, false), Lit(2, true) });
+    CHECK(c == Cl { Lit(1), Lit(-2) });
     REQUIRE(in.readClause(c));
-    CHECK(c == Cl { Lit(3, false) });
+    CHECK(c == Cl { Lit(3) });
     CHECK_FALSE(in.readClause(c));
+    CHECK(c.empty());
+}
+
+TEST_CASE("readClause accepts a final clause without terminating 0 and clears the output at eof") {
+    TempFile f("1 2 0\n-3");
+    StreamBuffer in(f.c_str());
+    Cl c;
+    REQUIRE(in.readClause(c));
+    CHECK(c == Cl { Lit(1), Lit(2) });
+    REQUIRE(in.readClause(c));
+    CHECK(c == Cl { Lit(-3) });
+    CHECK_FALSE(in.readClause(c));
+    CHECK(c.empty());
+
+    TempFile g("c only comments\nc here\n");
+    StreamBuffer in2(g.c_str());
+    c.push_back(Lit(9));
+    CHECK_FALSE(in2.readClause(c));
+    CHECK(c.empty());
+}
+
+TEST_CASE("CR-only line endings are treated as line ends") {
+    TempFile f("c comment\r1 2 0\r3 0\r");
+    StreamBuffer in(f.c_str());
+    REQUIRE(in.skipLine());
+    std::vector<int> v;
+    int x;
+    while (in.read(x)) v.push_back(x);
+    CHECK(v == std::vector<int> { 1, 2, 0, 3, 0 });
 }
 
 TEST_CASE("skipBlanks reports whether another token follows on the same line") {
@@ -177,21 +297,21 @@ TEST_CASE("skipBlanks reports whether another token follows on the same line") {
     int x;
     uint64_t top = 0;
     REQUIRE(in.skipString("p wcnf"));
-    REQUIRE(in.readInteger(&x));
-    REQUIRE(in.readInteger(&x));
+    REQUIRE(in.read(x));
+    REQUIRE(in.read(x));
     REQUIRE(in.skipBlanks());
-    REQUIRE(in.readUInt64(&top));
+    REQUIRE(in.read(top));
     CHECK(top == 10);
     CHECK_FALSE(in.skipBlanks());  // at newline
     REQUIRE(in.skipLine());
     REQUIRE(in.skipString("p wcnf"));
-    REQUIRE(in.readInteger(&x));
-    REQUIRE(in.readInteger(&x));
+    REQUIRE(in.read(x));
+    REQUIRE(in.read(x));
     CHECK_FALSE(in.skipBlanks());  // trailing blanks, then newline
     REQUIRE(in.skipLine());
-    REQUIRE(in.readInteger(&x));
+    REQUIRE(in.read(x));
     CHECK(x == 5);
-    REQUIRE(in.readInteger(&x));
+    REQUIRE(in.read(x));
     CHECK(x == 0);
     CHECK_FALSE(in.skipBlanks());  // at eof
 }
@@ -220,11 +340,59 @@ TEST_CASE("missing file throws") {
     CHECK_THROWS_AS(StreamBuffer("/nonexistent/propan/file.cnf"), ParserException);
 }
 
-TEST_CASE("empty file is a valid empty stream") {
+TEST_CASE("empty file is a valid empty stream for every operation") {
     TempFile f("");
     StreamBuffer in(f.c_str());
     CHECK(in.eof());
+    CHECK(*in == EOF);
+    CHECK_FALSE(in.skip());
     CHECK_FALSE(in.skipWhitespace());
+    CHECK_FALSE(in.skipBlanks());
+    CHECK_FALSE(in.skipLine());
+    CHECK_FALSE(in.skipNumber());
+    int x;
+    CHECK_FALSE(in.read(x));
+    std::string s;
+    CHECK_FALSE(in.readNumber(s));
+    Cl c;
+    CHECK_FALSE(in.readClause(c));
+    CHECK_THROWS_AS(in.skipString("p"), ParserException);
+    CHECK(in.eof());
+}
+
+TEST_CASE("whitespace-only file is exhausted by skipWhitespace") {
+    TempFile f(" \n\t\r\n ");
+    StreamBuffer in(f.c_str());
+    CHECK_FALSE(in.eof());
+    CHECK_FALSE(in.skipWhitespace());
+    CHECK(in.eof());
+    CHECK_FALSE(in.skip());
+}
+
+TEST_CASE("skip past the end of the file is safe and idempotent") {
+    TempFile f("1");
+    StreamBuffer in(f.c_str());
+    CHECK(*in == '1');
+    CHECK_FALSE(in.skip());
+    CHECK(in.eof());
+    CHECK_FALSE(in.skip());
+    CHECK(*in == EOF);
+}
+
+TEST_CASE("StreamBuffer is move-only") {
+    static_assert(!std::is_copy_constructible_v<StreamBuffer>);
+    static_assert(!std::is_copy_assignable_v<StreamBuffer>);
+    static_assert(std::is_nothrow_move_constructible_v<StreamBuffer>);
+    TempFile f("1 2 0\n");
+    StreamBuffer in(f.c_str());
+    int x;
+    REQUIRE(in.read(x));
+    StreamBuffer moved(std::move(in));
+    REQUIRE(moved.read(x));
+    CHECK(x == 2);
+    REQUIRE(moved.read(x));
+    CHECK(x == 0);
+    CHECK_FALSE(moved.read(x));
 }
 
 TEST_CASE("transparently decompresses gzip and xz") {
@@ -237,7 +405,7 @@ TEST_CASE("transparently decompresses gzip and xz") {
         while (in.skipWhitespace()) {
             if (*in == 'c' || *in == 'p') {
                 if (!in.skipLine()) break;
-            } else if (in.readInteger(&x)) {
+            } else if (in.read(x)) {
                 v.push_back(x);
             }
         }

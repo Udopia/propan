@@ -12,122 +12,86 @@
 #include <archive_entry.h>
 
 #include <algorithm>
-#include <cctype>
-#include <cerrno>
-#include <cstdint>
+#include <charconv>
+#include <concepts>
+#include <cstddef>
 #include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <exception>
 #include <limits>
+#include <memory>
+#include <stdexcept>
 #include <string>
+#include <string_view>
+#include <system_error>
+#include <type_traits>
+#include <vector>
 
 #include "propan/solver_types.h"
 
 namespace propan {
 
 /// Error while opening or parsing an input file.
-class ParserException : public std::exception {
- public:
-    explicit ParserException(const std::string& what) noexcept : what_(what) { }
-
-    const char* what() const noexcept override { return what_.c_str(); }
-
- private:
-    std::string what_;
+struct ParserException : std::runtime_error {
+    using std::runtime_error::runtime_error;
 };
 
 /**
  * @brief Buffered reader for text files, transparently decompressing any format
  * supported by libarchive (e.g. gzip, bzip2, xz, lzma).
  *
- * The file is read in chunks into a fixed-size buffer. Each chunk is aligned
- * to end at whitespace, so that a token never crosses a chunk boundary; tokens
- * longer than the buffer are rejected with a ParserException (except within
- * lines skipped by skipLine()).
+ * The file is read in chunks into a fixed-size buffer. Before a token is
+ * parsed, the buffer is refilled until the token is complete, so tokens may
+ * cross chunk boundaries but must not exceed the buffer size (#BUFFER_SIZE);
+ * longer tokens are rejected with a ParserException. Lines skipped with
+ * skipLine() may be arbitrarily long.
  *
  * Reading methods skip leading whitespace (including newlines) and return
  * `false` if the end of the file is reached before a token is found. Errors
- * are reported by throwing ParserException.
- *
- * Not copyable: the object owns the archive handle and the buffer.
+ * are reported by throwing ParserException. The object is move-only.
  */
 class StreamBuffer {
  public:
+    /// Size of the internal buffer and hence the maximum token length.
+    static constexpr std::size_t BUFFER_SIZE = 16384;
+
     /**
      * @brief Opens the file and reads the first chunk.
      * @throw ParserException if the file cannot be opened or read
      */
     explicit StreamBuffer(const char* filename) : filename_(filename) {
-        file_ = archive_read_new();
-        archive_read_support_filter_all(file_);
-        archive_read_support_format_raw(file_);
-        archive_read_support_format_empty(file_);
-        int r = archive_read_open_filename(file_, filename, buffer_size_);
-        if (r != ARCHIVE_OK) {
-            std::string msg = std::string(archive_error_string(file_)) + " Error opening file: " + filename;
-            archive_read_free(file_);
-            throw ParserException(msg);
+        archive_read_support_filter_all(file_.get());
+        archive_read_support_format_raw(file_.get());
+        archive_read_support_format_empty(file_.get());
+        if (archive_read_open_filename(file_.get(), filename, BUFFER_SIZE) != ARCHIVE_OK) fail(archiveError());
+        archive_entry* entry;
+        switch (archive_read_next_header(file_.get(), &entry)) {
+            case ARCHIVE_OK: refill(); break;
+            case ARCHIVE_EOF: drained_ = true; break;  // empty input
+            default: fail(archiveError());
         }
-        struct archive_entry* entry;
-        r = archive_read_next_header(file_, &entry);
-        if (r == ARCHIVE_EOF) {  // empty input
-            buffer_ = new char[buffer_size_]();
-            end_of_file_ = true;
-            return;
-        }
-        if (r != ARCHIVE_OK) {
-            archive_read_free(file_);
-            throw ParserException(std::string("Error reading header: ") + filename);
-        }
-        buffer_ = new char[buffer_size_];
-        try {
-            refillBuffer();
-        } catch (...) {
-            archive_read_free(file_);
-            delete[] buffer_;
-            throw;
-        }
-    }
-
-    StreamBuffer(const StreamBuffer&) = delete;
-    StreamBuffer& operator=(const StreamBuffer&) = delete;
-
-    ~StreamBuffer() {
-        archive_read_free(file_);
-        delete[] buffer_;
     }
 
     /// Current character, or `EOF` at the end of the file.
-    char operator*() const { return eof() ? EOF : buffer_[pos_]; }
+    char operator*() const { return eof() ? EOF : cur(); }
 
     /// True if the end of the file is reached.
-    bool eof() const { return pos_ >= end_ && end_of_file_; }
+    bool eof() const { return pos_ == end_; }
 
     /**
      * @brief Advances by one character.
-     * @param align align the next chunk to whitespace (see class documentation)
-     * @pre !eof()
-     * @return false if the end of the file is reached
+     * @return false if the end of the file is reached (or was already)
      */
-    bool skip(bool align = true) {
+    bool skip() {
+        if (eof()) return false;
         if (++pos_ < end_) return true;
-        return refillBuffer(align);
+        return refill();
     }
 
     /**
      * @brief Skips the rest of the current line and all subsequent whitespace.
-     *
-     * The line may be longer than the internal buffer (e.g. long comments).
-     * @pre !eof()
      * @return false if the end of the file is reached
      */
     bool skipLine() {
-        while (buffer_[pos_] != '\n' && buffer_[pos_] != '\r') {
-            if (!skip(false)) return false;
-        }
-        // realign manually since skip(false) did not; nothing to align at eof
-        if (!end_of_file_) alignBuffer();
+        while (!eof() && cur() != '\n' && cur() != '\r') skip();
         return skipWhitespace();
     }
 
@@ -136,11 +100,8 @@ class StreamBuffer {
      * @return false if the end of the file is reached
      */
     bool skipWhitespace() {
-        if (eof()) return false;  // also covers pos == end == 0 after the last refill
-        while (isSpace(buffer_[pos_])) {
-            if (!skip()) return false;
-        }
-        return true;
+        while (!eof() && isSpace(cur())) skip();
+        return !eof();
     }
 
     /**
@@ -151,11 +112,8 @@ class StreamBuffer {
      * @return true if another token follows on the current line
      */
     bool skipBlanks() {
-        if (eof()) return false;
-        while (buffer_[pos_] == ' ' || buffer_[pos_] == '\t') {
-            if (!skip()) return false;
-        }
-        return !isSpace(buffer_[pos_]) && buffer_[pos_] != '\0';
+        while (!eof() && (cur() == ' ' || cur() == '\t')) skip();
+        return !eof() && !isSpace(cur());
     }
 
     /**
@@ -163,92 +121,46 @@ class StreamBuffer {
      * @throw ParserException if the string does not match
      * @return false if the end of the file is reached right after the string
      */
-    bool skipString(const char* str) {
-        if (eof()) return false;
-        while (*str == buffer_[pos_]) {
-            ++str;
-            if (*str == '\0') {
-                return skip();
-            }
-            if (!skip()) {
-                throw ParserException(std::string(filename_) + ": expected '" + str + "'");
-            }
+    bool skipString(std::string_view str) {
+        for (char c : str) {
+            if (eof() || cur() != c) fail("expected '" + std::string(str) + "'");
+            skip();
         }
-        throw ParserException(std::string(filename_) + ": expected '" + str + "'");
-    }
-
-    /**
-     * @brief Skips the next number (with optional sign) after leading whitespace.
-     * @throw ParserException if the next token is not a number
-     * @return false if the end of the file is reached before a number
-     */
-    bool skipNumber() {
-        if (!skipWhitespace()) return false;
-        if (buffer_[pos_] == '-' || buffer_[pos_] == '+') {
-            if (!skip()) return false;
-        }
-        if (!isDigit(buffer_[pos_])) {
-            if (!skipWhitespace()) return false;
-            if (!isDigit(buffer_[pos_])) {
-                throw ParserException(std::string(filename_) + ": unexpected character: " + buffer_[pos_]);
-            }
-        }
-        while (isDigit(buffer_[pos_])) {
-            if (!skip()) break;
-        }
-        return true;
+        return !eof();
     }
 
     /**
      * @brief Reads the next integer after leading whitespace.
      *
-     * Accepts values in the symmetric range [-INT32_MAX, INT32_MAX], which
-     * covers all DIMACS literals.
+     * Accepts an optional sign. For signed types the symmetric range
+     * `[-max, max]` is accepted, so that the negation is representable, too.
      * @param[out] out the integer read
      * @throw ParserException if the next token is not an integer or out of range
-     * @return false if the end of the file is reached before an integer
+     * @return false if the end of the file is reached before a token
      */
-    bool readInteger(int* out) {
+    template<std::integral T>
+    bool read(T& out) {
         if (!skipWhitespace()) return false;
-        char* str = buffer_ + pos_;
-        char* str_end = nullptr;
-        errno = 0;
-        long number = std::strtol(str, &str_end, 10);
-        if (errno != 0) {
-            throw ParserException(std::string(filename_) + ": strtol() errno: " + std::to_string(errno));
+        std::string_view token = this->token();
+        if (token.starts_with('+')) token.remove_prefix(1);  // std::from_chars rejects a plus sign
+        auto [ptr, ec] = std::from_chars(token.data(), token.data() + token.size(), out);
+        if (ec == std::errc::invalid_argument) unexpected();
+        if (ec == std::errc::result_out_of_range) fail("number out of range");
+        if constexpr (std::is_signed_v<T>) {
+            if (out == std::numeric_limits<T>::min()) fail("number out of range");
         }
-        if (str_end == str) {
-            throw ParserException(std::string(filename_) + ": unexpected character: " + buffer_[pos_]);
-        }
-        if (std::abs(number) > std::numeric_limits<int32_t>::max()) {
-            throw ParserException(std::string(filename_) + ": number out of int32 range");
-        }
-        pos_ += static_cast<unsigned>(str_end - str);
-        *out = static_cast<int>(number);
+        pos_ = ptr - buf_.data();
         return true;
     }
 
     /**
-     * @brief Reads the next unsigned 64-bit integer after leading whitespace.
-     * @param[out] out the integer read
-     * @throw ParserException if the next token is not a number or out of range
-     * @return false if the end of the file is reached before a number
+     * @brief Skips the next number (with optional sign) after leading whitespace.
+     * @throw ParserException if the next token is not a number
+     * @return false if the end of the file is reached before a token
      */
-    bool readUInt64(uint64_t* out) {
+    bool skipNumber() {
         if (!skipWhitespace()) return false;
-        char* str = buffer_ + pos_;
-        char* str_end = nullptr;
-        errno = 0;
-        unsigned long long number = std::strtoull(str, &str_end, 10);
-        if (errno != 0) {
-            throw ParserException(std::string(filename_) + ": strtoull() errno: " + std::to_string(errno));
-        }
-        if (str_end == str) {
-            throw ParserException(std::string(filename_) + ": unexpected character: " + buffer_[pos_]);
-        }
-        static_assert(std::numeric_limits<unsigned long long>::max() <= std::numeric_limits<uint64_t>::max());
-        pos_ += static_cast<unsigned>(str_end - str);
-        *out = static_cast<uint64_t>(number);
+        pos_ += number().size();
         return true;
     }
 
@@ -256,31 +168,17 @@ class StreamBuffer {
      * @brief Reads the next number as a string of digits after leading whitespace.
      *
      * A leading '-' is kept, a leading '+' is dropped. Useful for numbers of
-     * arbitrary length.
+     * arbitrary length (up to #BUFFER_SIZE).
      * @param[out] out the digits read
      * @throw ParserException if the next token is not a number
-     * @return false if the end of the file is reached before a number
+     * @return false if the end of the file is reached before a token
      */
-    bool readNumber(std::string* out) {
-        std::string result;
+    bool readNumber(std::string& out) {
         if (!skipWhitespace()) return false;
-        if (buffer_[pos_] == '-') {
-            result.append(1, buffer_[pos_]);
-            if (!skip()) return false;
-        } else if (buffer_[pos_] == '+') {
-            if (!skip()) return false;
-        }
-        if (!isDigit(buffer_[pos_])) {
-            if (!skipWhitespace()) return false;
-            if (!isDigit(buffer_[pos_])) {
-                throw ParserException(std::string(filename_) + ": unexpected character: " + buffer_[pos_]);
-            }
-        }
-        while (isDigit(buffer_[pos_])) {
-            result.append(1, buffer_[pos_]);
-            if (!skip()) break;
-        }
-        *out = result;
+        std::string_view number = this->number();
+        pos_ += number.size();
+        if (number.starts_with('+')) number.remove_prefix(1);
+        out = number;
         return true;
     }
 
@@ -289,78 +187,86 @@ class StreamBuffer {
      *
      * Skips comment lines ('c') and header lines ('p') before the clause. A
      * clause that is not terminated by 0 at the end of the file is accepted.
-     * @param[out] out the clause read
+     * @param[out] out the clause read; empty if none was read
      * @throw ParserException on malformed input
      * @return false if the end of the file is reached before a clause
      */
     bool readClause(Cl& out) {
-        Cl clause;
+        out.clear();
         if (!skipWhitespace()) return false;
-        while (buffer_[pos_] == 'p' || buffer_[pos_] == 'c') {
+        while (cur() == 'p' || cur() == 'c') {
             if (!skipLine()) return false;
         }
-        int plit;
-        while (readInteger(&plit)) {
-            if (plit == 0) break;
-            clause.push_back(Lit::fromDimacs(plit));
-        }
-        out = clause;
+        int lit;
+        while (read(lit) && lit != 0) out.push_back(Lit(lit));
         return true;
     }
 
  private:
-    static constexpr unsigned buffer_size_ = 16384;
+    // Locale-independent "C" classification; also well-defined for negative chars.
+    static bool isSpace(char c) { return c == ' ' || (c >= '\t' && c <= '\r'); }
+    static bool isDigit(char c) { return c >= '0' && c <= '9'; }
 
-    struct archive* file_ = nullptr;
-    char* buffer_ = nullptr;
-    unsigned pos_ = 0;           ///< current read position
-    unsigned end_ = 0;           ///< one past the last valid position
-    bool end_of_file_ = false;   ///< true once the last chunk of the file is in the buffer
-    const char* filename_;
+    /// Current character. @pre !eof()
+    char cur() const { return buf_[pos_]; }
 
-    static bool isSpace(char c) { return std::isspace(static_cast<unsigned char>(c)); }
-    static bool isDigit(char c) { return std::isdigit(static_cast<unsigned char>(c)); }
+    [[noreturn]] void fail(const std::string& what) const { throw ParserException(filename_ + ": " + what); }
+    [[noreturn]] void unexpected() const { fail(std::string("unexpected character: ") + cur()); }
+
+    std::string archiveError() const {
+        const char* msg = archive_error_string(file_.get());
+        return msg ? msg : "unknown libarchive error";
+    }
 
     /**
-     * Moves the unread tail of the buffer (beyond end_) to the front and fills
-     * the rest from the file.
+     * Moves the unread part of the buffer to the front and appends the next
+     * chunk of the file.
+     * @throw ParserException if the buffer is full, i.e. a token exceeds #BUFFER_SIZE
      * @return false if nothing is left to read
      */
-    bool refillBuffer(bool align = true) {
-        if (pos_ >= end_ && !end_of_file_) {
-            pos_ = 0;
-            if (end_ > 0 && end_ < buffer_size_) {
-                std::copy(buffer_ + end_, buffer_ + buffer_size_, buffer_);
-                end_ = buffer_size_ - end_;
-            } else {
-                end_ = 0;
-            }
-            la_ssize_t n = archive_read_data(file_, buffer_ + end_, buffer_size_ - end_);
-            if (n < 0) {
-                throw ParserException(std::string(filename_) + ": " + archive_error_string(file_));
-            }
-            end_ += static_cast<unsigned>(n);
-            if (end_ < buffer_size_) {
-                std::memset(buffer_ + end_, 0, buffer_size_ - end_);
-                end_of_file_ = true;
-            } else if (align) {
-                alignBuffer();
-            }
-            // the last chunk may line up exactly with eof, leaving pos == end == 0
-            return end_ > 0;
-        }
-        return false;
+    bool refill() {
+        if (drained_) return false;
+        if (pos_ == 0 && end_ == BUFFER_SIZE) fail("maximum token length exceeded");
+        std::copy(buf_.begin() + pos_, buf_.begin() + end_, buf_.begin());
+        end_ -= pos_;
+        pos_ = 0;
+        la_ssize_t n = archive_read_data(file_.get(), buf_.data() + end_, BUFFER_SIZE - end_);
+        if (n < 0) fail(archiveError());
+        end_ += n;
+        drained_ = n == 0;
+        return !drained_;
     }
 
-    /// Shrinks end_ to the last whitespace so that no token crosses the chunk boundary.
-    void alignBuffer() {
-        while (!isSpace(buffer_[end_ - 1])) {
-            end_--;
-            if (end_ < 1) {
-                throw ParserException("Error reading file: maximum token length exceeded");
-            }
+    /**
+     * The whitespace-delimited token at the current position, refilling the
+     * buffer until it is complete. The view is valid until the next refill.
+     * @pre !eof()
+     */
+    std::string_view token() {
+        for (;;) {
+            const char* begin = buf_.data() + pos_;
+            const char* end = buf_.data() + end_;
+            const char* space = std::find_if(begin, end, isSpace);
+            if (space != end) return { begin, space };
+            if (!refill()) return { buf_.data() + pos_, buf_.data() + end_ };
         }
     }
+
+    /// The optional sign and the digits at the current position. @throw ParserException if there are no digits
+    std::string_view number() {
+        std::string_view token = this->token();
+        std::size_t n = token.starts_with('-') || token.starts_with('+');
+        if (n == token.size() || !isDigit(token[n])) unexpected();
+        while (n < token.size() && isDigit(token[n])) ++n;
+        return token.substr(0, n);
+    }
+
+    std::unique_ptr<archive, decltype(&archive_read_free)> file_ { archive_read_new(), archive_read_free };
+    std::vector<char> buf_ = std::vector<char>(BUFFER_SIZE);
+    std::string filename_;
+    std::size_t pos_ = 0;  ///< current read position
+    std::size_t end_ = 0;  ///< one past the last valid position
+    bool drained_ = false; ///< true once the file has been read completely
 };
 
 }  // namespace propan

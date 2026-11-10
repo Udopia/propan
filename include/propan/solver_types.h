@@ -3,11 +3,12 @@
 
 /**
  * @file solver_types.h
- * @brief Basic Boolean types: variables, literals and clauses.
+ * @brief Basic Boolean types: variables, literals, clauses and maps indexed by them.
  */
 
 #pragma once
 
+#include <cassert>
 #include <cstdint>
 #include <ostream>
 #include <span>
@@ -18,16 +19,13 @@ namespace propan {
 /**
  * @brief A Boolean variable, identified by a positive integer as in DIMACS.
  *
- * Id 0 is reserved and denotes the undefined variable; its literals are the
- * constants #TRUE_LIT and #FALSE_LIT. The largest id #MAX_ID is one below the
- * representable maximum, as the topmost literal index is #UNDEF_LIT. Converts
- * implicitly to `int` so that it can be used directly as an index into
- * per-variable arrays.
+ * Id 0 is reserved and denotes the undefined variable. Converts implicitly to
+ * `int` so that it can be used directly as an index into per-variable arrays.
  */
 class Var {
  public:
     /// Largest valid variable id.
-    static constexpr uint32_t MAX_ID = (UINT32_MAX >> 1) - 1;
+    static constexpr uint32_t MAX_ID = INT32_MAX;
 
     /// Undefined variable (id 0).
     constexpr Var() noexcept : id_(0) { }
@@ -59,106 +57,124 @@ class Var {
 };
 
 /**
- * @brief A literal, i.e., a variable or its negation.
+ * @brief A literal, i.e., a variable or its negation, in DIMACS style.
  *
- * Encoded as `2 * var + sign`, where sign `true` means negated. Hence, a literal
- * and its complement are adjacent in the order of literals. Converts implicitly
- * to `int` (its index) so that it can be used directly as an index into
- * per-literal arrays such as occurrence lists.
+ * Stored as the signed integer of the DIMACS format: `var` for the positive
+ * and `-var` for the negative literal, so the complement of `lit` is `-lit`
+ * and toDimacs() is the identity. The default literal is #UNDEF_LIT ("no
+ * literal"), stored as 0 like the DIMACS clause terminator; it has no
+ * variable and must not be negated.
  *
- * The literals of the reserved variable 0 are the constants #TRUE_LIT (index 0)
- * and #FALSE_LIT (index 1). The default literal is #UNDEF_LIT (index
- * `UINT32_MAX`), which denotes "no literal"; it lies outside every per-literal
- * array and must not be negated.
+ * A literal does not convert to an integer. Use toDimacs() for the signed
+ * value and index() for the position in per-literal arrays, where the two
+ * literals of a variable are adjacent: `index() = 2 * var + sign`. LitMap
+ * wraps a vector indexed by literals. Comparison with `<` follows the index,
+ * not the signed value, so sorting places `lit` right before `-lit`.
  */
 class Lit {
  public:
     /// The undefined literal #UNDEF_LIT ("no literal").
-    constexpr Lit() noexcept : x_(UINT32_MAX) { }
+    constexpr Lit() noexcept : x_(0) { }
+
+    /// Literal from its DIMACS representation (e.g. -3 for the negation of variable 3).
+    constexpr explicit Lit(int dimacs) noexcept : x_(dimacs) { }
 
     /// Literal of variable with the given id; negated if `sign` is true.
-    constexpr Lit(uint32_t var_id, bool sign) noexcept : x_(2 * var_id + sign) { }
+    constexpr Lit(uint32_t var_id, bool sign) noexcept
+        : x_(sign ? -static_cast<int32_t>(var_id) : static_cast<int32_t>(var_id)) {
+        assert(var_id <= Var::MAX_ID);
+    }
 
     /// Literal of the given variable; negated if `sign` is true.
     constexpr Lit(Var var, bool sign) noexcept : Lit(var.id(), sign) { }
 
-    /// Positive literal of variable with the given id.
-    constexpr explicit Lit(uint32_t var_id) noexcept : Lit(var_id, false) { }
-
     /// Positive literal of the given variable.
     constexpr explicit Lit(Var var) noexcept : Lit(var, false) { }
 
-    /// Literal from its DIMACS representation (e.g. -3 for the negation of variable 3).
-    static constexpr Lit fromDimacs(int dimacs) noexcept {
-        return dimacs < 0 ? Lit(static_cast<uint32_t>(-dimacs), true) : Lit(static_cast<uint32_t>(dimacs), false);
-    }
-
     /// Literal from its index (inverse of index()).
-    static constexpr Lit fromIndex(uint32_t index) noexcept {
-        Lit lit;
-        lit.x_ = index;
-        return lit;
-    }
+    static constexpr Lit fromIndex(uint32_t index) noexcept { return Lit(index >> 1, index & 1); }
 
     /// Index into per-literal arrays: `2 * var + sign`.
-    constexpr uint32_t index() const noexcept { return x_; }
-
-    /// Index into per-literal arrays (equals index()).
-    constexpr operator int() const noexcept { return x_; }
+    constexpr uint32_t index() const noexcept { return 2 * var().id() + sign(); }
 
     /// True if the literal is negated.
-    constexpr bool sign() const noexcept { return x_ & 1; }
+    constexpr bool sign() const noexcept { return x_ < 0; }
 
     /// Variable of the literal.
-    constexpr Var var() const noexcept { return Var(x_ >> 1); }
+    constexpr Var var() const noexcept { return Var(static_cast<uint32_t>(x_ < 0 ? -x_ : x_)); }
 
     /// Positive literal of the same variable.
-    constexpr Lit positive() const noexcept { return fromIndex(x_ & ~1u); }
+    constexpr Lit positive() const noexcept { return sign() ? -*this : *this; }
 
     /// Negative literal of the same variable.
-    constexpr Lit negative() const noexcept { return fromIndex(x_ | 1u); }
+    constexpr Lit negative() const noexcept { return sign() ? *this : -*this; }
 
-    /// DIMACS representation (inverse of fromDimacs()).
-    constexpr int toDimacs() const noexcept {
-        return sign() ? -static_cast<int>(var().id()) : static_cast<int>(var().id());
-    }
+    /// DIMACS representation (inverse of Lit(int)).
+    constexpr int toDimacs() const noexcept { return x_; }
 
     /// Complementary literal.
-    constexpr Lit operator~() const noexcept { return fromIndex(x_ ^ 1); }
+    constexpr Lit operator-() const noexcept { return Lit(-x_); }
 
     /// Complementary literal if `b` is true, same literal otherwise.
-    constexpr Lit operator^(bool b) const noexcept { return fromIndex(x_ ^ (b ? 1 : 0)); }
+    constexpr Lit operator^(bool b) const noexcept { return b ? -*this : *this; }
 
-    constexpr bool operator==(Lit p) const noexcept { return x_ == p.x_; }
-    constexpr bool operator!=(Lit p) const noexcept { return x_ != p.x_; }
+    constexpr bool operator==(const Lit&) const noexcept = default;
 
-    /// Order by index; `p` and `~p` are adjacent.
-    constexpr bool operator<(Lit p) const noexcept { return x_ < p.x_; }
-
-    /// Next literal in index order.
-    constexpr Lit& operator++() noexcept {
-        ++x_;
-        return *this;
-    }
-
-    /// Previous literal in index order.
-    constexpr Lit& operator--() noexcept {
-        --x_;
-        return *this;
-    }
+    /// Order by index(); `p` and `-p` are adjacent.
+    constexpr bool operator<(Lit p) const noexcept { return index() < p.index(); }
 
  private:
-    uint32_t x_;
+    int32_t x_;
 };
 
-/// Constant true literal: positive literal of the reserved variable 0 (index 0).
-inline constexpr Lit TRUE_LIT = Lit::fromIndex(0);
+/// Undefined literal ("no literal"), stored as 0; equals `Lit()`.
+inline constexpr Lit UNDEF_LIT = Lit();
 
-/// Constant false literal: negative literal of the reserved variable 0 (index 1).
-inline constexpr Lit FALSE_LIT = Lit::fromIndex(1);
+/**
+ * @brief A vector with one element per literal, indexed by Lit via Lit::index().
+ *
+ * The two literals of a variable occupy adjacent slots. Slots 0 and 1 belong
+ * to the undefined variable, so a map over `n` variables holds `2 * n + 2`
+ * elements.
+ */
+template<typename T>
+class LitMap {
+ public:
+    using reference = typename std::vector<T>::reference;
+    using const_reference = typename std::vector<T>::const_reference;
 
-/// Undefined literal ("no literal"), index `UINT32_MAX`; equals `Lit()`.
-inline constexpr Lit UNDEF_LIT = Lit::fromIndex(UINT32_MAX);
+    LitMap() = default;
+
+    /// Map over the literals of variables `1..n_vars`, every element initialized to `value`.
+    explicit LitMap(unsigned n_vars, const T& value = T()) : data_(2 * n_vars + 2, value) { }
+
+    /// Resizes to cover the literals of variables `1..n_vars`; new elements are initialized to `value`.
+    void resize(unsigned n_vars, const T& value = T()) { data_.resize(2 * n_vars + 2, value); }
+
+    /// Removes all elements (zero variables).
+    void clear() noexcept { data_.clear(); }
+
+    /// Number of variables covered.
+    unsigned nVars() const noexcept { return data_.empty() ? 0 : static_cast<unsigned>(data_.size() / 2 - 1); }
+
+    reference operator[](Lit lit) {
+        assert(lit.index() < data_.size());
+        return data_[lit.index()];
+    }
+
+    const_reference operator[](Lit lit) const {
+        assert(lit.index() < data_.size());
+        return data_[lit.index()];
+    }
+
+    auto begin() noexcept { return data_.begin(); }
+    auto end() noexcept { return data_.end(); }
+    auto begin() const noexcept { return data_.begin(); }
+    auto end() const noexcept { return data_.end(); }
+
+ private:
+    std::vector<T> data_;
+};
 
 /**
  * @brief Truth value of a variable or literal: #VAL_TRUE, #VAL_FALSE or #VAL_UNASSIGNED.

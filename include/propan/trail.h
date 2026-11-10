@@ -30,9 +30,10 @@ namespace propan {
  * (decisions) before propagate() adds their consequences. backtrack() undoes
  * the most recent level.
  *
- * Values are of type Val (#VAL_TRUE, #VAL_FALSE, #VAL_UNASSIGNED), so that the
- * value of a literal is the value of its variable, negated if the literal is
- * negative.
+ * Values are of type Val (#VAL_TRUE, #VAL_FALSE, #VAL_UNASSIGNED) and are
+ * stored per literal, so that looking up the value of a literal is a single
+ * load; assigning a literal writes its value and the negated value of its
+ * complement.
  *
  * Propagation uses occurrence lists, i.e. every clause is visited whenever
  * one of its literals becomes false.
@@ -62,8 +63,8 @@ class Trail {
     bool init(const CNFFormula& formula) {
         clear();
         clauses_ = &formula.clauses();
-        occ_.resize(2 * formula.nVars() + 2);
-        val_.resize(formula.nVars() + 1);
+        occ_.resize(formula.nVars());
+        val_.resize(formula.nVars());
         bool ok = true;
         for (auto clause : *clauses_) {
             if (clause.empty()) ok = false;
@@ -86,7 +87,7 @@ class Trail {
     bool propagate() {
         const ClauseArena& clauses = *clauses_;
         while (head_ < trail_.size()) {
-            Lit falsified = ~trail_[head_++];
+            Lit falsified = -trail_[head_++];
             for (ClauseRef ref : occ_[falsified]) {
                 Lit unit = UNDEF_LIT;
                 for (Lit lit : clauses[ref]) {
@@ -126,7 +127,8 @@ class Trail {
     bool backtrack() {
         if (trail_lim_.size() <= 1) return false;
         for (std::size_t i = trail_lim_.back(); i < trail_.size(); ++i) {
-            val_[trail_[i].var()] = VAL_UNASSIGNED;
+            val_[trail_[i]] = VAL_UNASSIGNED;
+            val_[-trail_[i]] = VAL_UNASSIGNED;
         }
         trail_.resize(trail_lim_.back());
         trail_lim_.pop_back();
@@ -135,13 +137,10 @@ class Trail {
     }
 
     /// Value of the variable: #VAL_TRUE, #VAL_FALSE or #VAL_UNASSIGNED.
-    Val value(Var var) const { return val_[var]; }
+    Val value(Var var) const { return val_[Lit(var)]; }
 
     /// Value of the literal: #VAL_TRUE, #VAL_FALSE or #VAL_UNASSIGNED.
-    Val value(Lit lit) const {
-        Val v = val_[lit.var()];
-        return lit.sign() ? -v : v;
-    }
+    Val value(Lit lit) const { return val_[lit]; }
 
     /// The i-th assigned literal.
     Lit operator[](std::size_t i) const { return trail_[i]; }
@@ -153,7 +152,7 @@ class Trail {
     std::span<const Lit> literals() const noexcept { return trail_; }
 
     /// Number of variables of the formula given to init().
-    unsigned nVars() const noexcept { return val_.empty() ? 0 : static_cast<unsigned>(val_.size() - 1); }
+    unsigned nVars() const noexcept { return val_.nVars(); }
 
     /// Current decision level (0 = root level).
     unsigned level() const noexcept { return static_cast<unsigned>(trail_lim_.size() - 1); }
@@ -187,14 +186,15 @@ class Trail {
  private:
     /// Assigns the unassigned literal true on the current level.
     void assign(Lit lit) {
-        val_[lit.var()] = lit.sign() ? VAL_FALSE : VAL_TRUE;
+        val_[lit] = VAL_TRUE;
+        val_[-lit] = VAL_FALSE;
         trail_.push_back(lit);
     }
 
     std::vector<Lit> trail_;                      ///< assigned literals in assignment order
     std::vector<unsigned> trail_lim_ { 0 };       ///< trail position where each level starts
-    std::vector<Val> val_;                        ///< value per variable
-    std::vector<std::vector<ClauseRef>> occ_;     ///< occurrence list per literal
+    LitMap<Val> val_;                             ///< value per literal
+    LitMap<std::vector<ClauseRef>> occ_;          ///< occurrence list per literal
     const ClauseArena* clauses_ = nullptr;        ///< clauses of the formula given to init()
     std::size_t head_ = 0;                        ///< first trail position not yet propagated
 };

@@ -9,6 +9,7 @@
 #pragma once
 
 #include <algorithm>
+#include <bit>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -124,19 +125,12 @@ class ClauseHeader {
         assert(!flags.deleted());
     }
 
-    /// Header from its raw word.
-    static constexpr ClauseHeader fromWord(uint32_t word) noexcept {
-        ClauseHeader h;
-        h.word_ = word;
-        return h;
-    }
-
     /// Deleted record with this many payload words after its header.
     static constexpr ClauseHeader padding(uint32_t payload) noexcept {
         assert(payload <= MAX_PAYLOAD);
-        ClauseFlags flags;
-        flags.setDeleted();
-        return fromWord((uint32_t(flags.bits()) << SIZE_BITS) | payload);
+        ClauseHeader h;
+        h.word_ = (uint32_t(ClauseFlags::DELETED) << SIZE_BITS) | payload;
+        return h;
     }
 
     /// The raw word.
@@ -175,15 +169,15 @@ class BasicClauseView {
 
     BasicClauseView(pointer words, ClauseRef ref) noexcept : words_(words), ref_(ref) { }
 
-    ClauseHeader header() const noexcept { return ClauseHeader::fromWord(words_[0].index()); }
-    ClauseId id() const noexcept { return ClauseId(words_[1].index()); }
+    ClauseHeader header() const noexcept { return std::bit_cast<ClauseHeader>(words_[0]); }
+    ClauseId id() const noexcept { return std::bit_cast<ClauseId>(words_[1]); }
     ClauseRef ref() const noexcept { return ref_; }
     ClauseFlags flags() const noexcept { return header().flags(); }
     void setFlags(ClauseFlags flags) const requires (!Const) {
         if (flags.deleted()) {
             throw std::invalid_argument("propan::ClauseArena: use erase() to delete a clause");
         }
-        words_[0] = Lit::fromIndex(ClauseHeader(size(), flags).word());
+        words_[0] = std::bit_cast<Lit>(ClauseHeader(size(), flags));
     }
 
     uint32_t size() const noexcept { return header().size(); }
@@ -213,7 +207,8 @@ using ConstClauseView = BasicClauseView<true>;
  * Live layout: `[payload/flags][id][literals...]`. Deleted records use
  * `[payload/deleted][unused...]`, permitting single-word padding.
  * Every record occupies 1 + payload words, regardless of deletion.
- * All words are Lit objects; headers/IDs are encoded without type punning.
+ * All words are Lit objects; headers and IDs are stored in literal slots
+ * via std::bit_cast.
  * Iteration scans physical records, not the ID-to-reference table.
  *
  * Adding may invalidate views and iterators; shrinking/deleting invalidates
@@ -314,8 +309,8 @@ class ClauseArena {
         reserveFor(refs_, refs_.size() + 1);
         if (internal) clause = { lits_.data() + source, size };
         lits_.resize(lits_.size() + size + 2);
-        lits_[ref.offset()] = Lit::fromIndex(ClauseHeader(static_cast<uint32_t>(size), flags).word());
-        lits_[ref.offset() + 1] = Lit::fromIndex(static_cast<uint32_t>(refs_.size()));
+        lits_[ref.offset()] = std::bit_cast<Lit>(ClauseHeader(static_cast<uint32_t>(size), flags));
+        lits_[ref.offset() + 1] = std::bit_cast<Lit>(ClauseId(static_cast<uint32_t>(refs_.size())));
         std::copy(clause.begin(), clause.end(), lits_.begin() + ref.offset() + 2);
         refs_.push_back(ref);
         ++count_;
@@ -326,13 +321,13 @@ class ClauseArena {
     /// Header of the referenced clause.
     ClauseHeader header(ClauseRef ref) const {
         assert(ref.offset() < lits_.size());
-        return ClauseHeader::fromWord(lits_[ref.offset()].index());
+        return std::bit_cast<ClauseHeader>(lits_[ref.offset()]);
     }
 
     /// Stable metadata index of a live clause.
     ClauseId id(ClauseRef ref) const {
         assert(!header(ref).deleted());
-        return ClauseId(lits_[ref.offset() + 1].index());
+        return std::bit_cast<ClauseId>(lits_[ref.offset() + 1]);
     }
 
     /// Current offset for an issued ID; UNDEF if that clause was deleted.
@@ -371,9 +366,8 @@ class ClauseArena {
         assert(!h.deleted());
         if (size > h.size()) throw std::invalid_argument("propan::ClauseArena: shrink would grow clause");
         if (size == h.size()) return;
-        lits_[ref.offset() + 2 + size] = Lit::fromIndex(
-            ClauseHeader::padding(h.size() - size - 1).word());
-        lits_[ref.offset()] = Lit::fromIndex(ClauseHeader(size, h.flags()).word());
+        lits_[ref.offset() + 2 + size] = std::bit_cast<Lit>(ClauseHeader::padding(h.size() - size - 1));
+        lits_[ref.offset()] = std::bit_cast<Lit>(ClauseHeader(size, h.flags()));
         n_lits_ -= h.size() - size;
     }
 
@@ -383,7 +377,7 @@ class ClauseArena {
         const ClauseId clause_id = id(ref);
         const uint32_t size = h.size();
         h.setDeleted();
-        lits_[ref.offset()] = Lit::fromIndex(h.word());
+        lits_[ref.offset()] = std::bit_cast<Lit>(h);
         refs_[clause_id.index()] = ClauseRef();
         --count_;
         n_lits_ -= size;

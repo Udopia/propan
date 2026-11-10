@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <bit>
 #include <concepts>
 #include <iterator>
 #include <optional>
@@ -87,7 +88,7 @@ TEST_CASE("ClauseHeader packs size and flags into one word") {
     static_assert(h.flags() == learnedFlags());
     static_assert(ClauseHeader(3, learnedFlags()).size() == 3);
     static_assert(ClauseHeader(3, learnedFlags()).flags().learned());
-    static_assert(ClauseHeader::fromWord(ClauseHeader(5, learnedFlags()).word()) ==
+    static_assert(std::bit_cast<ClauseHeader>(ClauseHeader(5, learnedFlags()).word()) ==
                   ClauseHeader(5, learnedFlags()));
     CHECK_FALSE(h.deleted());
     auto deleted = h;
@@ -131,7 +132,7 @@ TEST_CASE("clauses store size and flags, dense ID, then literals") {
     CHECK(a[r2].ref() == r2);
     CHECK(a[r2].header() == ClauseHeader(1, learnedFlags()));
     CHECK(asCl(a[ClauseId(1)]) == lits({ 3 }));
-    CHECK(a.data()[r2.offset() + 1].index() == 1);
+    CHECK(std::bit_cast<ClauseId>(a.data()[r2.offset() + 1]) == ClauseId(1));
     CHECK(a.nWords() == 12);
 }
 
@@ -175,7 +176,7 @@ TEST_CASE("typed flags cannot bypass arena deletion bookkeeping") {
 
 TEST_CASE("clauses longer than MAX_SIZE are rejected") {
     ClauseArena a;
-    std::vector<Lit> big(ClauseHeader::MAX_SIZE + 1, Lit::fromDimacs(1));
+    std::vector<Lit> big(ClauseHeader::MAX_SIZE + 1, Lit(1));
     CHECK_THROWS_AS(a.add(big), std::length_error);
     CHECK(a.empty());
     CHECK(a.refs().empty());
@@ -231,7 +232,7 @@ TEST_CASE("views and physical iterators preserve constness and expose identity")
     CHECK(clause.id() == a.id(ref));
     CHECK(clause.ref() == ref);
     clause.setFlags(learnedFlags());
-    clause[0] = Lit::fromDimacs(-1);
+    clause[0] = Lit(-1);
     std::span<Lit> mutable_lits = clause;
     mutable_lits[1] = Lit(4);
     ConstClauseView converted = clause;
@@ -271,13 +272,13 @@ TEST_CASE("shrinking creates skippable padding including a one-word record") {
     a.shrink(first, 3);
     CHECK(a.header(first) == ClauseHeader(3, learnedFlags()));
     CHECK(asCl(a[first]) == lits({ 1, 2, 3 }));
-    CHECK(ClauseHeader::fromWord(a.data()[5].index()) == ClauseHeader::padding(0));
+    CHECK(std::bit_cast<ClauseHeader>(a.data()[5]) == ClauseHeader::padding(0));
     a.shrink(first, 1);
     CHECK(a.header(first).payload() == 2);
-    CHECK(ClauseHeader::fromWord(a.data()[3].index()) == ClauseHeader::padding(1));
+    CHECK(std::bit_cast<ClauseHeader>(a.data()[3]) == ClauseHeader::padding(1));
     a.shrink(first, 0);
     CHECK(a.header(first).payload() == 1);
-    CHECK(ClauseHeader::fromWord(a.data()[2].index()) == ClauseHeader::padding(0));
+    CHECK(std::bit_cast<ClauseHeader>(a.data()[2]) == ClauseHeader::padding(0));
     a.shrink(first, 0);
     CHECK(a[first].empty());
     CHECK(a.nLits() == 1);
@@ -382,7 +383,7 @@ TEST_CASE("compaction preserves IDs and metadata and returns reference relocatio
 
 TEST_CASE("raw words including UNDEF are not mistaken for padding") {
     ClauseArena a;
-    ClauseRef ref = a.add(std::vector<Lit>{ UNDEF_LIT, Lit::fromIndex(ClauseHeader::padding(0).word()) });
+    ClauseRef ref = a.add(std::vector<Lit>{ UNDEF_LIT, std::bit_cast<Lit>(ClauseHeader::padding(0)) });
     CHECK(a.begin() != a.end());
     CHECK(a[ref].size() == 2);
     CHECK(a[ref][0] == UNDEF_LIT);
@@ -408,7 +409,7 @@ TEST_CASE("literals can be modified in place") {
     ClauseRef r = a.add(lits({ 1, 2, 3 }));
     std::span<Lit> c = a[r];
     std::swap(c[0], c[2]);
-    c[1] = Lit::fromDimacs(-5);
+    c[1] = Lit(-5);
     CHECK(asCl(a[r]) == lits({ 3, -5, 1 }));
     CHECK(a.header(r).size() == 3);
 }
@@ -417,7 +418,7 @@ TEST_CASE("copies are deep, moves leave the source empty") {
     ClauseArena a;
     ClauseRef r = a.add(lits({ 1, 2 }));
     ClauseArena b(a);
-    b[r][0] = Lit::fromDimacs(5);
+    b[r][0] = Lit(5);
     CHECK(asCl(a[r]) == lits({ 1, 2 }));
     ClauseArena c(std::move(a));
     CHECK(c.size() == 1);

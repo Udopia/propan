@@ -138,11 +138,11 @@ class WCNFFormula {
                 if (*in == 'p') {
                     in.skipString("p wcnf");
                     int vars, n_clauses;
-                    if (in.readInteger(&vars) && vars > 0) {
+                    if (in.read(vars) && vars > 0) {
                         ensureVars(static_cast<unsigned>(vars));
                     }
-                    in.readInteger(&n_clauses);
-                    has_top = in.skipBlanks() && in.readUInt64(&top);
+                    in.read(n_clauses);
+                    has_top = in.skipBlanks() && in.read(top);
                 }
                 if (!in.skipLine()) break;
             } else {
@@ -152,13 +152,13 @@ class WCNFFormula {
                     hard = true;
                     in.skip();
                 } else {
-                    in.readUInt64(&weight);
+                    in.read(weight);
                     hard = has_top && weight >= top;
                 }
                 int plit;
-                while (in.readInteger(&plit)) {
+                while (in.read(plit)) {
                     if (plit == 0) break;
-                    clause.push_back(Lit::fromDimacs(plit));
+                    clause.push_back(Lit(plit));
                 }
                 if (hard) {
                     addHardClause(clause);
